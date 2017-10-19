@@ -160,6 +160,14 @@ func (gs *gitSource) Resolve(ctx context.Context, id source.Identifier) (source.
 	}, nil
 }
 
+func splitRef(ref string) (string, string) {
+	parts := strings.SplitN(ref, "#", 2)
+	if len(parts) > 1 {
+		return parts[0], parts[1]
+	}
+	return parts[0], parts[0]
+}
+
 func (gs *gitSourceHandler) CacheKey(ctx context.Context) (string, error) {
 	remote := gs.src.Remote
 	ref := gs.src.Ref
@@ -169,9 +177,11 @@ func (gs *gitSourceHandler) CacheKey(ctx context.Context) (string, error) {
 	gs.locker.Lock(remote)
 	defer gs.locker.Unlock(remote)
 
-	if isCommitSHA(ref) {
-		gs.cacheKey = ref
-		return ref, nil
+	ref, shaRef := splitRef(ref)
+
+	if isCommitSHA(shaRef) {
+		gs.cacheKey = shaRef
+		return shaRef, nil
 	}
 
 	gitDir, unmountGitDir, err := gs.mountRemote(ctx, remote)
@@ -205,6 +215,8 @@ func (gs *gitSourceHandler) Snapshot(ctx context.Context) (out cache.ImmutableRe
 	if ref == "" {
 		ref = "master"
 	}
+
+	ref, _ = splitRef(ref)
 
 	cacheKey := gs.cacheKey
 	if cacheKey == "" {

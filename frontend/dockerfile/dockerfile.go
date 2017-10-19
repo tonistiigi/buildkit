@@ -24,6 +24,7 @@ const (
 	defaultDockerfileName = "Dockerfile"
 	localNameDockerfile   = "dockerfile"
 	buildArgPrefix        = "build-arg:"
+	localNameContext      = "context"
 )
 
 func NewDockerfileFrontend() frontend.Frontend {
@@ -33,7 +34,6 @@ func NewDockerfileFrontend() frontend.Frontend {
 type dfFrontend struct{}
 
 func (f *dfFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBridge, opts map[string]string) (retRef cache.ImmutableRef, exporterAttr map[string][]byte, retErr error) {
-
 	filename := opts[keyFilename]
 	if filename == "" {
 		filename = defaultDockerfileName
@@ -48,6 +48,11 @@ func (f *dfFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBr
 		llb.IncludePatterns([]string{filename}),
 		llb.SessionID(sid),
 	)
+
+	if strings.HasPrefix(opts[localNameContext], "git://") {
+		
+	}
+
 	def, err := src.Marshal()
 	if err != nil {
 		return nil, nil, err

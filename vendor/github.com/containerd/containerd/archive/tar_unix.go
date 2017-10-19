@@ -65,9 +65,9 @@ func mkdirAll(path string, perm os.FileMode) error {
 func prepareApply() func() {
 	// Unset unmask before doing an apply operation,
 	// restore unmask when complete
-	oldmask := unix.Umask(0)
+	// oldmask := unix.Umask(0)
 	return func() {
-		unix.Umask(oldmask)
+		// unix.Umask(oldmask)
 	}
 }
 

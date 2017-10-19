@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BurntSushi/locker"
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/cache/cacheimport"
 	"github.com/moby/buildkit/cache/contenthash"
@@ -24,6 +25,12 @@ import (
 	"golang.org/x/net/context"
 	"golang.org/x/sync/errgroup"
 )
+
+var contentLock *locker.Locker
+
+func init() {
+	contentLock = locker.NewLocker()
+}
 
 type LLBOpt struct {
 	SourceManager    *source.Manager
@@ -600,6 +607,8 @@ func (vs *vertexSolver) run(ctx context.Context, signal func()) (retErr error) {
 		if err != nil {
 			return err
 		}
+		contentLock.Lock(contentKey.String())
+		defer contentLock.Unlock(contentKey.String())
 		vs.contentKey = contentKey
 
 		var extraKeys []digest.Digest

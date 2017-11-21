@@ -31,11 +31,8 @@ func GenerateSpec(ctx context.Context, meta worker.Meta, mounts []worker.Mount, 
 	}
 	// Note that containerd.GenerateSpec is namespaced so as to make
 	// specs.Linux.CgroupsPath namespaced
-	s, err := containerd.GenerateSpec(ctx, nil, c,
-		containerd.WithHostNamespace(specs.NetworkNamespace),
-		containerd.WithHostResolvconf,
-		containerd.WithHostHostsFile,
-	)
+	s, err := containerd.GenerateSpec(ctx, nil, c)
+
 	if err != nil {
 		return nil, nil, err
 	}

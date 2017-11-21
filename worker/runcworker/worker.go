@@ -14,6 +14,7 @@ import (
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/worker"
+	"github.com/moby/buildkit/worker/bridge"
 	"github.com/moby/buildkit/worker/oci"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -104,22 +105,51 @@ func (w *runcworker) Exec(ctx context.Context, meta worker.Meta, root cache.Moun
 		return err
 	}
 
-	logrus.Debugf("> running %s %v", id, meta.Args)
-
-	status, err := w.runc.Run(ctx, id, bundle, &runc.CreateOpts{
-		IO: &forwardIO{stdin: stdin, stdout: stdout, stderr: stderr},
-	})
-	logrus.Debugf("< completed %s %v %v", id, status, err)
-	if status != 0 {
-		select {
-		case <-ctx.Done():
-			// runc can't report context.Cancelled directly
-			return errors.Wrapf(ctx.Err(), "exit code %d", status)
-		default:
-		}
-		return errors.Errorf("exit code %d", status)
+	//nullIO, err := runc.NewNullIO()
+	nullIO, err := runc.NewPipeIO(1000, 1000)
+	if err != nil {
+		return errors.Wrap(err, "creating new NULL IO")
 	}
 
+	logrus.Debugf("> creating %s %v", id, meta.Args)
+	err = w.runc.Create(ctx, id, bundle, &runc.CreateOpts{
+		IO: nullIO,
+	})
+	if err != nil {
+		logrus.Debugf("> error %v ", err)
+	}
+
+	ctr, err := w.runc.State(ctx, id)
+	logrus.Debugf("> Status: %s %d", ctr.Status, ctr.Pid)
+
+	// FIXME: remove hardcoded "docker0" with user input
+	pair, err := bridge.CreateBridgePair("docker0")
+	if err != nil {
+		return errors.Wrapf(err, "error in paring ")
+	}
+
+	if err := pair.Set(ctr.Pid); err != nil {
+		return errors.Wrapf(err, "could not set bridge network ")
+	}
+	defer pair.Remove()
+
+	logrus.Debugf("> starting %s", id)
+	err = w.runc.Start(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	ctr, _ = w.runc.State(ctx, id)
+	logrus.Debugf("> Status: %s %d", ctr.Status, ctr.Pid)
+
+	//TODO: Cleanup the container once its finished.
+	//	logrus.Debugf("< completed %s %s %v", id, ctr.Status, err)
+
+	//	err = w.runc.Delete(ctx, id, &runc.DeleteOpts{})
+	//	if err != nil {
+	//		logrus.Debugf("< error %s %s %v", id, ctr.Status, err)
+	//		return err
+	//	}
 	return err
 }
 

@@ -3,12 +3,16 @@ package runcworker
 import (
 	"encoding/json"
 	"io"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"syscall"
 
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/sys"
 	runc "github.com/containerd/go-runc"
 	"github.com/docker/docker/pkg/symlink"
 	"github.com/moby/buildkit/cache"
@@ -29,6 +33,10 @@ type runcworker struct {
 func New(root string) (worker.Worker, error) {
 	if err := exec.Command("runc", "--version").Run(); err != nil {
 		return nil, errors.Wrap(err, "failed to find runc binary")
+	}
+
+	if err := setSubReaper(); err != nil {
+		return nil, err
 	}
 
 	if err := os.MkdirAll(root, 0700); err != nil {
@@ -105,61 +113,125 @@ func (w *runcworker) Exec(ctx context.Context, meta worker.Meta, root cache.Moun
 		return err
 	}
 
-	//nullIO, err := runc.NewNullIO()
-	nullIO, err := runc.NewPipeIO(1000, 1000)
+	forwardIO, err := newForwardIO(stdin, stdout, stderr)
 	if err != nil {
-		return errors.Wrap(err, "creating new NULL IO")
+		return errors.Wrap(err, "creating new forwarding IO")
 	}
+	defer forwardIO.Close()
+
+	pidFilePath := filepath.Join(w.root, "runc_pid_"+identity.NewID())
+	defer os.RemoveAll(pidFilePath)
 
 	logrus.Debugf("> creating %s %v", id, meta.Args)
-	err = w.runc.Create(ctx, id, bundle, &runc.CreateOpts{
-		IO: nullIO,
-	})
-	if err != nil {
-		logrus.Debugf("> error %v ", err)
+	if err := w.runc.Create(ctx, id, bundle, &runc.CreateOpts{
+		PidFile: pidFilePath,
+		IO:      forwardIO,
+	}); err != nil {
+		return err
 	}
+	forwardIO.release()
 
-	ctr, err := w.runc.State(ctx, id)
-	logrus.Debugf("> Status: %s %d", ctr.Status, ctr.Pid)
+	defer func() {
+		if err := w.runc.Delete(context.TODO(), id, &runc.DeleteOpts{}); err != nil {
+			logrus.Errorf("failed to delete %s: %+v", id, err)
+		}
+	}()
+
+	dt, err := ioutil.ReadFile(pidFilePath)
+	if err != nil {
+		return err
+	}
+	pid, err := strconv.Atoi(string(dt))
+	if err != nil {
+		return err
+	}
 
 	// FIXME: remove hardcoded "docker0" with user input
 	pair, err := bridge.CreateBridgePair("docker0")
 	if err != nil {
-		return errors.Wrapf(err, "error in paring ")
+		return errors.Wrap(err, "error in creating bridge pair")
 	}
 
-	if err := pair.Set(ctr.Pid); err != nil {
-		return errors.Wrapf(err, "could not set bridge network ")
+	if err := pair.Set(pid); err != nil {
+		return errors.Wrap(err, "could not set bridge network")
 	}
 	defer pair.Remove()
 
-	logrus.Debugf("> starting %s", id)
 	err = w.runc.Start(ctx, id)
 	if err != nil {
 		return err
 	}
 
-	ctr, _ = w.runc.State(ctx, id)
-	logrus.Debugf("> Status: %s %d", ctr.Status, ctr.Pid)
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
 
-	//TODO: Cleanup the container once its finished.
-	//	logrus.Debugf("< completed %s %s %v", id, ctr.Status, err)
+	if ps, err := p.Wait(); err != nil {
+		status := 255
+		if ws, ok := ps.Sys().(syscall.WaitStatus); ok {
+			status = ws.ExitStatus()
+		}
+		if status != 0 {
+			return errors.Errorf("exit code: %d", status)
+		}
+	}
 
-	//	err = w.runc.Delete(ctx, id, &runc.DeleteOpts{})
-	//	if err != nil {
-	//		logrus.Debugf("< error %s %s %v", id, ctr.Status, err)
-	//		return err
-	//	}
-	return err
+	return nil
 }
 
 type forwardIO struct {
-	stdin          io.ReadCloser
-	stdout, stderr io.WriteCloser
+	stdin, stdout, stderr *os.File
+	toRelease             []io.Closer
+	toClose               []io.Closer
+}
+
+func newForwardIO(stdin io.ReadCloser, stdout, stderr io.WriteCloser) (f *forwardIO, err error) {
+	fio := &forwardIO{}
+	defer func() {
+		if err != nil {
+			fio.Close()
+		}
+	}()
+	if stdin != nil {
+		fio.stdin, err = fio.readCloserToFile(stdin)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if stdout != nil {
+		fio.stdout, err = fio.writeCloserToFile(stdout)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if stderr != nil {
+		fio.stderr, err = fio.writeCloserToFile(stderr)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return fio, nil
 }
 
 func (s *forwardIO) Close() error {
-	return nil
+	s.release()
+	var err error
+	for _, cl := range s.toClose {
+		if err1 := cl.Close(); err == nil {
+			err = err1
+		}
+	}
+	s.toClose = nil
+	return err
+}
+
+// release releases active FDs if the process doesn't need them any more
+func (s *forwardIO) release() {
+	for _, cl := range s.toRelease {
+		cl.Close()
+	}
+	s.toRelease = nil
 }
 
 func (s *forwardIO) Set(cmd *exec.Cmd) {
@@ -178,4 +250,54 @@ func (s *forwardIO) Stdout() io.ReadCloser {
 
 func (s *forwardIO) Stderr() io.ReadCloser {
 	return nil
+}
+
+func (s *forwardIO) readCloserToFile(rc io.ReadCloser) (*os.File, error) {
+	if f, ok := rc.(*os.File); ok {
+		return f, nil
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	s.toClose = append(s.toClose, pw)
+	s.toRelease = append(s.toRelease, pr)
+	go func() {
+		_, err := io.Copy(pw, rc)
+		if err1 := pw.Close(); err == nil {
+			err = err1
+		}
+		_ = err
+	}()
+	return pr, nil
+}
+
+func (s *forwardIO) writeCloserToFile(wc io.WriteCloser) (*os.File, error) {
+	if f, ok := wc.(*os.File); ok {
+		return f, nil
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	s.toClose = append(s.toClose, pr)
+	s.toRelease = append(s.toRelease, pw)
+	go func() {
+		_, err := io.Copy(wc, pr)
+		if err1 := pw.Close(); err == nil {
+			err = err1
+		}
+		_ = err
+	}()
+	return pw, nil
+}
+
+var subReaperOnce sync.Once
+var subReaperError error
+
+func setSubReaper() error {
+	subReaperOnce.Do(func() {
+		subReaperError = sys.SetSubreaper(1)
+	})
+	return subReaperError
 }

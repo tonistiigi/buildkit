@@ -9,6 +9,8 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/exporter"
+	"github.com/moby/buildkit/frontend"
+	"github.com/moby/buildkit/solver-next"
 	"github.com/moby/buildkit/solver/types"
 	digest "github.com/opencontainers/go-digest"
 )
@@ -23,7 +25,8 @@ type Worker interface {
 	Labels() map[string]string
 	InstructionCache() instructioncache.InstructionCache
 	// ResolveOp resolves Vertex.Sys() to Op implementation. SubBuilder is needed for pb.Op_Build.
-	ResolveOp(v types.Vertex, s SubBuilder) (types.Op, error)
+	// FIXME
+	ResolveOp(v solver.Vertex, s frontend.FrontendLLBBridge) (solver.Op, error)
 	ResolveImageConfig(ctx context.Context, ref string) (digest.Digest, []byte, error)
 	// Exec is similar to executor.Exec but without []mount.Mount
 	Exec(ctx context.Context, meta executor.Meta, rootFS cache.ImmutableRef, stdin io.ReadCloser, stdout, stderr io.WriteCloser) error

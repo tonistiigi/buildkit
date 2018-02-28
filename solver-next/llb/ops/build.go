@@ -1,4 +1,4 @@
-package llbop
+package ops
 
 import (
 	"context"
@@ -6,11 +6,12 @@ import (
 	"os"
 
 	"github.com/containerd/continuity/fs"
+	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/snapshot"
-	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/solver-next"
+	llbsolver "github.com/moby/buildkit/solver-next/llb"
 	"github.com/moby/buildkit/solver/pb"
-	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 )
@@ -19,19 +20,19 @@ const buildCacheType = "buildkit.build.v0"
 
 type buildOp struct {
 	op *pb.BuildOp
-	s  worker.SubBuilder
+	b  solver.Builder
 	v  solver.Vertex
 }
 
-func NewBuildOp(v solver.Vertex, op *pb.Op_Build, s worker.SubBuilder) (solver.Op, error) {
+func NewBuildOp(v solver.Vertex, op *pb.Op_Build, b solver.Builder) (solver.Op, error) {
 	return &buildOp{
 		op: op.Build,
-		s:  s,
+		b:  b,
 		v:  v,
 	}, nil
 }
 
-func (b *buildOp) CacheKey(ctx context.Context) (digest.Digest, error) {
+func (b *buildOp) CacheMap(ctx context.Context) (*solver.CacheMap, error) {
 	dt, err := json.Marshal(struct {
 		Type string
 		Exec *pb.BuildOp
@@ -40,12 +41,19 @@ func (b *buildOp) CacheKey(ctx context.Context) (digest.Digest, error) {
 		Exec: b.op,
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return digest.FromBytes(dt), nil
+
+	return &solver.CacheMap{
+		Digest: digest.FromBytes(dt),
+		Deps: make([]struct {
+			Selector          digest.Digest
+			ComputeDigestFunc solver.ResultBasedCacheFunc
+		}, len(b.v.Inputs())),
+	}, nil
 }
 
-func (b *buildOp) Run(ctx context.Context, inputs []solver.Ref) (outputs []solver.Ref, retErr error) {
+func (b *buildOp) Exec(ctx context.Context, inputs []solver.Result) (outputs []solver.Result, retErr error) {
 	if b.op.Builder != pb.LLBBuilder {
 		return nil, errors.Errorf("only llb builder is currently allowed")
 	}
@@ -62,12 +70,12 @@ func (b *buildOp) Run(ctx context.Context, inputs []solver.Ref) (outputs []solve
 	}
 	inp := inputs[i]
 
-	ref, ok := solver.ToImmutableRef(inp)
+	ref, ok := inp.Sys().(cache.ImmutableRef)
 	if !ok {
-		return nil, errors.Errorf("invalid reference for build %T", inp)
+		return nil, errors.Errorf("invalid reference for build %T", inp.Sys())
 	}
 
-	mount, err := ref.Mount(ctx, false)
+	mount, err := ref.Mount(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -109,16 +117,15 @@ func (b *buildOp) Run(ctx context.Context, inputs []solver.Ref) (outputs []solve
 	lm.Unmount()
 	lm = nil
 
-	newref, err := b.s.SubBuild(ctx, b.v.Digest(), solver.SolveRequest{
-		Definition: def.ToPB(),
-	})
+	edge, err := llbsolver.Load(def.ToPB())
 	if err != nil {
 		return nil, err
 	}
 
-	return []solver.Ref{newref}, err
-}
+	newref, err := b.b.Build(ctx, edge)
+	if err != nil {
+		return nil, err
+	}
 
-func (b *buildOp) ContentMask(context.Context) (digest.Digest, [][]string, error) {
-	return "", nil, nil
+	return []solver.Result{newref}, err
 }

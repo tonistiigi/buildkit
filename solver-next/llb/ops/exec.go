@@ -1,4 +1,4 @@
-package llbop
+package ops
 
 import (
 	"context"
@@ -11,7 +11,8 @@ import (
 
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/executor"
-	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/solver-next"
+	"github.com/moby/buildkit/solver-next/llb"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/progress/logs"
 	digest "github.com/opencontainers/go-digest"
@@ -36,7 +37,21 @@ func NewExecOp(v solver.Vertex, op *pb.Op_Exec, cm cache.Manager, exec executor.
 	}, nil
 }
 
-func (e *execOp) CacheKey(ctx context.Context) (digest.Digest, error) {
+func cloneExecOp(old *pb.ExecOp) pb.ExecOp {
+	n := *old
+	for i := range n.Mounts {
+		*n.Mounts[i] = *n.Mounts[i]
+	}
+	return n
+}
+
+func (e *execOp) CacheMap(ctx context.Context) (*solver.CacheMap, error) {
+
+	op := cloneExecOp(e.op)
+	for i := range op.Mounts {
+		op.Mounts[i].Selector = ""
+	}
+
 	dt, err := json.Marshal(struct {
 		Type string
 		Exec *pb.ExecOp
@@ -44,21 +59,75 @@ func (e *execOp) CacheKey(ctx context.Context) (digest.Digest, error) {
 		Arch string
 	}{
 		Type: execCacheType,
-		Exec: e.op,
+		Exec: &op,
 		OS:   runtime.GOOS,
 		Arch: runtime.GOARCH,
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	return digest.FromBytes(dt), nil
+	cm := &solver.CacheMap{
+		Digest: digest.FromBytes(dt),
+		Deps: make([]struct {
+			Selector          digest.Digest
+			ComputeDigestFunc solver.ResultBasedCacheFunc
+		}, e.numInputs),
+	}
+
+	deps, err := e.getMountDeps()
+	if err != nil {
+		return nil, err
+	}
+
+	for i, dep := range deps {
+		if dep.Selector != "" {
+			cm.Deps[i].Selector = digest.FromBytes([]byte(dep.Selector))
+		}
+		if dep.ContentBasedHash {
+			cm.Deps[i].ComputeDigestFunc = llb.NewContentHashFunc(dep.Selector)
+		}
+	}
+
+	return cm, nil
 }
 
-func (e *execOp) Run(ctx context.Context, inputs []solver.Ref) ([]solver.Ref, error) {
+type dep struct {
+	Selector         string
+	ContentBasedHash bool
+}
+
+func (e *execOp) getMountDeps() ([]dep, error) {
+	deps := make([]dep, e.numInputs)
+	for _, m := range e.op.Mounts {
+		if m.Input == pb.Empty {
+			continue
+		}
+		if int(m.Input) >= len(deps) {
+			return nil, errors.Errorf("invalid mountinput %v", m)
+		}
+
+		if m.Selector != "" {
+			deps[m.Input].Selector = path.Join("/", m.Selector)
+		}
+
+		if m.Readonly && m.Dest != pb.RootMount { // exclude read-only rootfs
+			deps[m.Input].ContentBasedHash = true
+		}
+	}
+	return deps, nil
+}
+
+type output struct {
+	immutable cache.ImmutableRef
+	mutable   cache.MutableRef
+}
+
+func (e *execOp) Exec(ctx context.Context, inputs []solver.Result) ([]solver.Result, error) {
 	var mounts []executor.Mount
-	var outputs []solver.Ref
 	var root cache.Mountable
+
+	var outputs []cache.Ref
 
 	defer func() {
 		for _, o := range outputs {
@@ -77,7 +146,7 @@ func (e *execOp) Run(ctx context.Context, inputs []solver.Ref) ([]solver.Ref, er
 			}
 			inp := inputs[int(m.Input)]
 			var ok bool
-			ref, ok = solver.ToImmutableRef(inp)
+			ref, ok = inp.Sys().(cache.ImmutableRef)
 			if !ok {
 				return nil, errors.Errorf("invalid reference for exec %T", inputs[int(m.Input)])
 			}
@@ -85,7 +154,11 @@ func (e *execOp) Run(ctx context.Context, inputs []solver.Ref) ([]solver.Ref, er
 		}
 		if m.Output != pb.SkipOutput {
 			if m.Readonly && ref != nil && m.Dest != pb.RootMount { // exclude read-only rootfs
-				outputs = append(outputs, solver.NewSharedRef(ref).Clone())
+				out, err := e.cm.Get(ctx, ref.ID()) // TODO: add dup to immutableRef
+				if err != nil {
+					return nil, err
+				}
+				outputs = append(outputs, out)
 			} else {
 				active, err := e.cm.New(ctx, ref, cache.WithDescription(fmt.Sprintf("mount %s from exec %s", m.Dest, strings.Join(e.op.Meta.Args, " ")))) // TODO: should be method
 				if err != nil {
@@ -121,78 +194,18 @@ func (e *execOp) Run(ctx context.Context, inputs []solver.Ref) ([]solver.Ref, er
 		return nil, errors.Wrapf(err, "executor failed running %v", meta.Args)
 	}
 
-	refs := []solver.Ref{}
-	for i, o := range outputs {
-		if mutable, ok := o.(cache.MutableRef); ok {
+	refs := []solver.Result{}
+	for i, out := range outputs {
+		if mutable, ok := out.(cache.MutableRef); ok {
 			ref, err := mutable.Commit(ctx)
 			if err != nil {
 				return nil, errors.Wrapf(err, "error committing %s", mutable.ID())
 			}
-			refs = append(refs, ref)
+			refs = append(refs, llb.ImmutableRefToResult(ref))
 		} else {
-			refs = append(refs, o)
+			refs = append(refs, llb.ImmutableRefToResult(out.(cache.ImmutableRef)))
 		}
 		outputs[i] = nil
 	}
 	return refs, nil
-}
-
-func (e *execOp) ContentMask(ctx context.Context) (digest.Digest, [][]string, error) {
-	// contentKey for exec uses content based checksum for mounts and definition
-	// based checksum for root
-
-	skipped := make(map[int]struct{}, 0)
-
-	type src struct {
-		index    int
-		selector string
-	}
-
-	srcsMap := make(map[src]struct{})
-	mountsCopy := make([]*pb.Mount, len(e.op.Mounts))
-	for i, m := range e.op.Mounts {
-		copy := *m
-		mountsCopy[i] = &copy
-		if m.Input != pb.Empty {
-			if m.Dest != pb.RootMount && m.Readonly { // could also include rw if they don't have a selector, but not sure if helps performance
-				srcsMap[src{int(m.Input), path.Join("/", m.Selector)}] = struct{}{}
-				mountsCopy[i].Selector = ""
-			} else {
-				skipped[int(m.Input)] = struct{}{}
-			}
-		}
-	}
-	if len(srcsMap) == 0 {
-		return "", nil, nil
-	}
-
-	contentInputs := make([][]string, e.numInputs)
-	for in := range srcsMap {
-		contentInputs[in.index] = append(contentInputs[in.index], in.selector)
-	}
-	// TODO: remove nested directories
-
-	for k := range contentInputs {
-		sort.Strings(contentInputs[k])
-	}
-
-	ecopy := *e.op
-	ecopy.Mounts = mountsCopy
-
-	dt, err := json.Marshal(struct {
-		Type string
-		Exec *pb.ExecOp
-		OS   string
-		Arch string
-	}{
-		Type: execCacheType,
-		Exec: &ecopy,
-		OS:   runtime.GOOS,
-		Arch: runtime.GOARCH,
-	})
-	if err != nil {
-		return "", nil, err
-	}
-
-	return digest.FromBytes(dt), contentInputs, nil
 }

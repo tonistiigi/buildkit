@@ -1,10 +1,11 @@
-package llbop
+package ops
 
 import (
 	"context"
 	"sync"
 
-	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/solver-next"
+	"github.com/moby/buildkit/solver-next/llb"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/source"
 	digest "github.com/opencontainers/go-digest"
@@ -44,19 +45,23 @@ func (s *sourceOp) instance(ctx context.Context) (source.SourceInstance, error) 
 	return s.src, nil
 }
 
-func (s *sourceOp) CacheKey(ctx context.Context) (digest.Digest, error) {
+func (s *sourceOp) CacheMap(ctx context.Context) (*solver.CacheMap, error) {
 	src, err := s.instance(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	k, err := src.CacheKey(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return digest.FromBytes([]byte(sourceCacheType + ":" + k)), nil
+
+	return &solver.CacheMap{
+		// TODO: add os/arch
+		Digest: digest.FromBytes([]byte(sourceCacheType + ":" + k)),
+	}, nil
 }
 
-func (s *sourceOp) Run(ctx context.Context, _ []solver.Ref) ([]solver.Ref, error) {
+func (s *sourceOp) Exec(ctx context.Context, _ []solver.Result) (outputs []solver.Result, err error) {
 	src, err := s.instance(ctx)
 	if err != nil {
 		return nil, err
@@ -65,9 +70,5 @@ func (s *sourceOp) Run(ctx context.Context, _ []solver.Ref) ([]solver.Ref, error
 	if err != nil {
 		return nil, err
 	}
-	return []solver.Ref{ref}, nil
-}
-
-func (s *sourceOp) ContentMask(context.Context) (digest.Digest, [][]string, error) {
-	return "", nil, nil
+	return []solver.Result{llb.ImmutableRefToResult(ref)}, nil
 }

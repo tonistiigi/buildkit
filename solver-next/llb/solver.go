@@ -3,22 +3,23 @@ package llb
 import (
 	"context"
 
+	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/exporter"
 	"github.com/moby/buildkit/frontend"
+	"github.com/moby/buildkit/session"
 	solver "github.com/moby/buildkit/solver-next"
 	"github.com/moby/buildkit/worker"
+	"github.com/pkg/errors"
 )
 
 type ExporterRequest struct {
-	// Exporter       exporter.ExporterInstance
-	// ExportCacheRef string
+	Exporter       exporter.ExporterInstance
+	ExportCacheRef string
 }
 
 // ResolveWorkerFunc returns default worker for the temporary default non-distributed use cases
 type ResolveWorkerFunc func() (worker.Worker, error)
-
-// ResolveOpFunc finds an Op implementation for a vertex
-type ResolveOpFunc func(solver.Vertex) (solver.Op, error)
 
 type Solver struct {
 	solver        *solver.JobList // TODO: solver.Solver
@@ -28,19 +29,24 @@ type Solver struct {
 	// ci            *cacheimport.CacheImporter
 }
 
-func New(resolve ResolveOpFunc, resolveWorker ResolveWorkerFunc, f map[string]frontend.Frontend, cache solver.CacheManager) *Solver {
+func New(wc *worker.Controller, f map[string]frontend.Frontend, cacheStore solver.CacheKeyStorage) *Solver {
 	s := &Solver{
-		resolveWorker: resolveWorker,
+		resolveWorker: defaultResolver(wc),
 		frontends:     f,
 	}
+
+	results := newCacheResultStorage(wc)
+
+	cache := solver.NewCacheManager("local", cacheStore, results)
+
 	s.solver = solver.NewJobList(solver.SolverOpt{
-		ResolveOpFunc: s.resolver(resolve),
+		ResolveOpFunc: s.resolver(),
 		DefaultCache:  cache,
 	})
 	return s
 }
 
-func (s *Solver) resolver(f ResolveOpFunc) solver.ResolveOpFunc {
+func (s *Solver) resolver() solver.ResolveOpFunc {
 	return func(v solver.Vertex, b solver.Builder) (solver.Op, error) {
 		w, err := s.resolveWorker()
 		if err != nil {
@@ -66,7 +72,9 @@ func (s *Solver) Solve(ctx context.Context, id string, req frontend.SolveRequest
 
 	defer j.Discard()
 
-	res, exporterAttrs, err := s.Bridge(j).Solve(ctx, req)
+	j.SessionID = session.FromContext(ctx)
+
+	res, exporterOpt, err := s.Bridge(j).Solve(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -77,17 +85,25 @@ func (s *Solver) Solve(ctx context.Context, id string, req frontend.SolveRequest
 		}
 	}()
 
-	_ = exporterAttrs
+	if exp := exp.Exporter; exp != nil {
+		var immutable cache.ImmutableRef
+		if res != nil {
+			workerRef, ok := res.Sys().(*WorkerRef)
+			if !ok {
+				return errors.Errorf("invalid reference: %T", res.Sys())
+			}
+			immutable = workerRef.ImmutableRef
+		}
 
-	//
-	// if exp := req.Exporter; exp != nil {
-	// 	if err := inVertexContext(ctx, exp.Name(), func(ctx context.Context) error {
-	// 		return exp.Export(ctx, immutable, exporterOpt)
-	// 	}); err != nil {
-	// 		return err
-	// 	}
-	// }
-	//
+		// if err := inVertexContext(ctx, exp.Name(), func(ctx context.Context) error {
+		//
+		// }); err != nil {
+		// 	return err
+		// }
+
+		return exp.Export(ctx, immutable, exporterOpt)
+	}
+
 	// if exportName := req.ExportCacheRef; exportName != "" {
 	// 	if err := inVertexContext(ctx, "exporting build cache", func(ctx context.Context) error {
 	// 		cache, err := j.cacheExporter(ref)
@@ -116,4 +132,10 @@ func (s *Solver) Status(ctx context.Context, id string, statusChan chan *client.
 		return err
 	}
 	return j.Status(ctx, statusChan)
+}
+
+func defaultResolver(wc *worker.Controller) ResolveWorkerFunc {
+	return func() (worker.Worker, error) {
+		return wc.GetDefault()
+	}
 }

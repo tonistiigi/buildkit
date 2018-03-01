@@ -8,6 +8,7 @@ import (
 	"github.com/moby/buildkit/solver-next/llb"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/source"
+	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
 )
 
@@ -18,12 +19,14 @@ type sourceOp struct {
 	op  *pb.Op_Source
 	sm  *source.Manager
 	src source.SourceInstance
+	w   worker.Worker
 }
 
-func NewSourceOp(_ solver.Vertex, op *pb.Op_Source, sm *source.Manager) (solver.Op, error) {
+func NewSourceOp(_ solver.Vertex, op *pb.Op_Source, sm *source.Manager, w worker.Worker) (solver.Op, error) {
 	return &sourceOp{
 		op: op,
 		sm: sm,
+		w:  w,
 	}, nil
 }
 
@@ -70,5 +73,5 @@ func (s *sourceOp) Exec(ctx context.Context, _ []solver.Result) (outputs []solve
 	if err != nil {
 		return nil, err
 	}
-	return []solver.Result{llb.ImmutableRefToResult(ref)}, nil
+	return []solver.Result{llb.NewWorkerRefResult(ref, s.w)}, nil
 }

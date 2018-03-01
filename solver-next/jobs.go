@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/util/flightcontrol"
 	"github.com/moby/buildkit/util/progress"
+	"github.com/moby/buildkit/util/tracing"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 )
@@ -56,6 +58,34 @@ type state struct {
 	cache     map[string]CacheManager
 	mainCache CacheManager
 	jobList   *JobList
+}
+
+func (s *state) getSessionID() string {
+	// TODO: connect with sessionmanager to avoid getting dropped sessions
+	s.mu.Lock()
+	for j := range s.jobs {
+		if j.SessionID != "" {
+			s.mu.Unlock()
+			return j.SessionID
+		}
+	}
+	parents := map[digest.Digest]struct{}{}
+	for p := range s.parents {
+		parents[p] = struct{}{}
+	}
+	s.mu.Unlock()
+
+	for p := range parents {
+		s.jobList.mu.Lock()
+		pst, ok := s.jobList.actives[p]
+		s.jobList.mu.Unlock()
+		if ok {
+			if sessionID := pst.getSessionID(); sessionID != "" {
+				return sessionID
+			}
+		}
+	}
+	return ""
 }
 
 func (s *state) builder() Builder {
@@ -113,6 +143,9 @@ func (s *state) Release() {
 	for _, e := range s.edges {
 		e.release()
 	}
+	if s.op != nil {
+		s.op.release()
+	}
 }
 
 type subBuilder struct {
@@ -129,6 +162,7 @@ type Job struct {
 	pw   progress.Writer
 
 	progressCloser func()
+	SessionID      string
 }
 
 type SolverOpt struct {
@@ -488,6 +522,7 @@ func (s *sharedOp) CacheMap(ctx context.Context) (*CacheMap, error) {
 			return nil, s.cacheErr
 		}
 		ctx = progress.WithProgress(ctx, s.st.mpw)
+		ctx = session.NewContext(ctx, s.st.getSessionID())
 		res, err := op.CacheMap(ctx)
 		complete := true
 		if err != nil {
@@ -520,11 +555,22 @@ func (s *sharedOp) Exec(ctx context.Context, inputs []Result) (outputs []Result,
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.g.Do(ctx, "exec", func(ctx context.Context) (interface{}, error) {
+	res, err := s.g.Do(ctx, "exec", func(ctx context.Context) (ret interface{}, retErr error) {
 		if s.execRes != nil || s.execErr != nil {
 			return s.execRes, s.execErr
 		}
+
 		ctx = progress.WithProgress(ctx, s.st.mpw)
+		ctx = session.NewContext(ctx, s.st.getSessionID())
+
+		// no cache hit. start evaluating the node
+		span, ctx := tracing.StartSpan(ctx, s.st.vtx.Name())
+		notifyStarted(ctx, &s.st.clientVertex)
+		defer func() {
+			tracing.FinishWithError(span, retErr)
+			notifyCompleted(ctx, &s.st.clientVertex, retErr)
+		}()
+
 		res, err := op.Exec(ctx, inputs)
 		complete := true
 		if err != nil {
@@ -610,4 +656,28 @@ func (v *vertexWithCacheOptions) Digest() digest.Digest {
 
 func (v *vertexWithCacheOptions) Inputs() []Edge {
 	return v.inputs
+}
+
+func notifyStarted(ctx context.Context, v *client.Vertex) {
+	pw, _, _ := progress.FromContext(ctx)
+	defer pw.Close()
+	now := time.Now()
+	v.Started = &now
+	v.Completed = nil
+	pw.Write(v.Digest.String(), *v)
+}
+
+func notifyCompleted(ctx context.Context, v *client.Vertex, err error) {
+	pw, _, _ := progress.FromContext(ctx)
+	defer pw.Close()
+	now := time.Now()
+	if v.Started == nil {
+		v.Started = &now
+	}
+	v.Completed = &now
+	v.Cached = false
+	if err != nil {
+		v.Error = err.Error()
+	}
+	pw.Write(v.Digest.String(), *v)
 }

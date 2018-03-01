@@ -22,8 +22,7 @@ type llbBridge struct {
 }
 
 func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest) (res solver.Result, exp map[string][]byte, err error) {
-
-	if req.Definition != nil {
+	if req.Definition != nil && req.Definition.Def != nil {
 		edge, err := Load(req.Definition) // TODO: append cache
 		if err != nil {
 			return nil, nil, err
@@ -49,17 +48,15 @@ func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest) (res s
 	}
 
 	if res != nil {
-		immutable, ok := res.Sys().(cache.ImmutableRef)
+		wr, ok := res.Sys().(*WorkerRef)
 		if !ok {
 			return nil, nil, errors.Errorf("invalid reference for exporting: %T", res.Sys())
 		}
-		if err := immutable.Finalize(ctx); err != nil {
+		if err := wr.ImmutableRef.Finalize(ctx); err != nil {
 			return nil, nil, err
 		}
-		return
-	} else {
-		return nil, nil, errors.Errorf("invalid build request")
 	}
+	return
 }
 
 func (s *llbBridge) Exec(ctx context.Context, meta executor.Meta, root cache.ImmutableRef, stdin io.ReadCloser, stdout, stderr io.WriteCloser) (err error) {

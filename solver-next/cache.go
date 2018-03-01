@@ -328,7 +328,7 @@ func (c *inMemoryCacheManager) Load(ctx context.Context, rec *CacheRecord) (Resu
 
 	keyParts := strings.Split(rec.ID, "@")
 	if len(keyParts) != 2 {
-		return nil, errors.Errorf("invalid cache record ID")
+		return nil, errors.Errorf("invalid cache record ID: %s", rec.ID)
 	}
 	ck, err := c.getInternalKey(rec.CacheKey, false)
 	if err != nil {

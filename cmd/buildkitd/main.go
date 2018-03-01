@@ -21,6 +21,7 @@ import (
 	"github.com/moby/buildkit/frontend/dockerfile"
 	"github.com/moby/buildkit/frontend/gateway"
 	"github.com/moby/buildkit/session"
+	"github.com/moby/buildkit/solver-next/boltdbcachestorage"
 	"github.com/moby/buildkit/util/appcontext"
 	"github.com/moby/buildkit/util/appdefaults"
 	"github.com/moby/buildkit/util/profiler"
@@ -322,12 +323,18 @@ func newController(c *cli.Context, root string) (*control.Controller, error) {
 	ce = wt.CacheExporter
 	ci = wt.CacheImporter
 
+	cacheStorage, err := boltdbcachestorage.NewStore(filepath.Join(root, "cache.db"))
+	if err != nil {
+		return nil, err
+	}
+
 	return control.NewController(control.Opt{
 		SessionManager:   sessionManager,
 		WorkerController: wc,
 		Frontends:        frontends,
 		CacheExporter:    ce,
 		CacheImporter:    ci,
+		CacheKeyStorage:  cacheStorage,
 	})
 }
 

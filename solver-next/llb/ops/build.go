@@ -6,12 +6,13 @@ import (
 	"os"
 
 	"github.com/containerd/continuity/fs"
-	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/client/llb"
+	"github.com/moby/buildkit/frontend"
 	"github.com/moby/buildkit/snapshot"
 	"github.com/moby/buildkit/solver-next"
 	llbsolver "github.com/moby/buildkit/solver-next/llb"
 	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 )
@@ -20,11 +21,11 @@ const buildCacheType = "buildkit.build.v0"
 
 type buildOp struct {
 	op *pb.BuildOp
-	b  solver.Builder
+	b  frontend.FrontendLLBBridge
 	v  solver.Vertex
 }
 
-func NewBuildOp(v solver.Vertex, op *pb.Op_Build, b solver.Builder) (solver.Op, error) {
+func NewBuildOp(v solver.Vertex, op *pb.Op_Build, b frontend.FrontendLLBBridge, _ worker.Worker) (solver.Op, error) {
 	return &buildOp{
 		op: op.Build,
 		b:  b,
@@ -55,7 +56,7 @@ func (b *buildOp) CacheMap(ctx context.Context) (*solver.CacheMap, error) {
 
 func (b *buildOp) Exec(ctx context.Context, inputs []solver.Result) (outputs []solver.Result, retErr error) {
 	if b.op.Builder != pb.LLBBuilder {
-		return nil, errors.Errorf("only llb builder is currently allowed")
+		return nil, errors.Errorf("only LLB builder is currently allowed")
 	}
 
 	builderInputs := b.op.Inputs
@@ -70,12 +71,12 @@ func (b *buildOp) Exec(ctx context.Context, inputs []solver.Result) (outputs []s
 	}
 	inp := inputs[i]
 
-	ref, ok := inp.Sys().(cache.ImmutableRef)
+	ref, ok := inp.Sys().(*llbsolver.WorkerRef)
 	if !ok {
 		return nil, errors.Errorf("invalid reference for build %T", inp.Sys())
 	}
 
-	mount, err := ref.Mount(ctx, true)
+	mount, err := ref.ImmutableRef.Mount(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -117,12 +118,9 @@ func (b *buildOp) Exec(ctx context.Context, inputs []solver.Result) (outputs []s
 	lm.Unmount()
 	lm = nil
 
-	edge, err := llbsolver.Load(def.ToPB())
-	if err != nil {
-		return nil, err
-	}
-
-	newref, err := b.b.Build(ctx, edge)
+	newref, _, err := b.b.Solve(ctx, frontend.SolveRequest{
+		Definition: def.ToPB(),
+	})
 	if err != nil {
 		return nil, err
 	}

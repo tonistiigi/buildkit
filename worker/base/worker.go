@@ -22,11 +22,12 @@ import (
 	imageexporter "github.com/moby/buildkit/exporter/containerimage"
 	localexporter "github.com/moby/buildkit/exporter/local"
 	ociexporter "github.com/moby/buildkit/exporter/oci"
+	"github.com/moby/buildkit/frontend"
 	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/snapshot"
-	"github.com/moby/buildkit/solver"
-	"github.com/moby/buildkit/solver/llbop"
+	"github.com/moby/buildkit/solver-next"
+	"github.com/moby/buildkit/solver-next/llb/ops"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/source"
 	"github.com/moby/buildkit/source/containerimage"
@@ -217,14 +218,18 @@ func (w *Worker) Labels() map[string]string {
 	return w.WorkerOpt.Labels
 }
 
-func (w *Worker) ResolveOp(v solver.Vertex, s worker.SubBuilder) (solver.Op, error) {
+func (w *Worker) LoadRef(id string) (cache.ImmutableRef, error) {
+	return w.CacheManager.Get(context.TODO(), id)
+}
+
+func (w *Worker) ResolveOp(v solver.Vertex, s frontend.FrontendLLBBridge) (solver.Op, error) {
 	switch op := v.Sys().(type) {
 	case *pb.Op_Source:
-		return llbop.NewSourceOp(v, op, w.SourceManager)
+		return ops.NewSourceOp(v, op, w.SourceManager, w)
 	case *pb.Op_Exec:
-		return llbop.NewExecOp(v, op, w.CacheManager, w.Executor)
+		return ops.NewExecOp(v, op, w.CacheManager, w.Executor, w)
 	case *pb.Op_Build:
-		return llbop.NewBuildOp(v, op, s)
+		return ops.NewBuildOp(v, op, s, w)
 	default:
 		return nil, errors.Errorf("could not resolve %v", v)
 	}

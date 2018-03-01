@@ -5,7 +5,6 @@ import (
 	"io"
 
 	"github.com/moby/buildkit/cache"
-	"github.com/moby/buildkit/cache/instructioncache"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/exporter"
@@ -23,7 +22,8 @@ type Worker interface {
 	// ID needs to be unique in the cluster
 	ID() string
 	Labels() map[string]string
-	InstructionCache() instructioncache.InstructionCache
+	LoadRef(id string) (cache.ImmutableRef, error)
+	// InstructionCache() instructioncache.InstructionCache
 	// ResolveOp resolves Vertex.Sys() to Op implementation. SubBuilder is needed for pb.Op_Build.
 	// FIXME
 	ResolveOp(v solver.Vertex, s frontend.FrontendLLBBridge) (solver.Op, error)

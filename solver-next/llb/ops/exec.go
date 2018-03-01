@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/moby/buildkit/solver-next/llb"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/progress/logs"
+	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 )
@@ -25,28 +27,31 @@ type execOp struct {
 	op        *pb.ExecOp
 	cm        cache.Manager
 	exec      executor.Executor
+	w         worker.Worker
 	numInputs int
 }
 
-func NewExecOp(v solver.Vertex, op *pb.Op_Exec, cm cache.Manager, exec executor.Executor) (solver.Op, error) {
+func NewExecOp(v solver.Vertex, op *pb.Op_Exec, cm cache.Manager, exec executor.Executor, w worker.Worker) (solver.Op, error) {
 	return &execOp{
 		op:        op.Exec,
 		cm:        cm,
 		exec:      exec,
 		numInputs: len(v.Inputs()),
+		w:         w,
 	}, nil
 }
 
 func cloneExecOp(old *pb.ExecOp) pb.ExecOp {
 	n := *old
+	n.Mounts = nil
 	for i := range n.Mounts {
-		*n.Mounts[i] = *n.Mounts[i]
+		m := *n.Mounts[i]
+		n.Mounts = append(n.Mounts, &m)
 	}
 	return n
 }
 
 func (e *execOp) CacheMap(ctx context.Context) (*solver.CacheMap, error) {
-
 	op := cloneExecOp(e.op)
 	for i := range op.Mounts {
 		op.Mounts[i].Selector = ""
@@ -81,20 +86,48 @@ func (e *execOp) CacheMap(ctx context.Context) (*solver.CacheMap, error) {
 	}
 
 	for i, dep := range deps {
-		if dep.Selector != "" {
-			cm.Deps[i].Selector = digest.FromBytes([]byte(dep.Selector))
+		if len(dep.Selectors) != 0 {
+			dgsts := make([][]byte, 0, len(dep.Selectors))
+			for _, p := range dep.Selectors {
+				dgsts = append(dgsts, []byte(p))
+			}
+			cm.Deps[i].Selector = digest.FromBytes(bytes.Join(dgsts, []byte{0}))
 		}
-		if dep.ContentBasedHash {
-			cm.Deps[i].ComputeDigestFunc = llb.NewContentHashFunc(dep.Selector)
+		if !dep.NoContentBasedHash {
+			cm.Deps[i].ComputeDigestFunc = llb.NewContentHashFunc(dedupePaths(dep.Selectors))
 		}
 	}
 
 	return cm, nil
 }
 
+func dedupePaths(inp []string) []string {
+	old := make(map[string]struct{}, len(inp))
+	for _, p := range inp {
+		old[p] = struct{}{}
+	}
+	paths := make([]string, 0, len(old))
+	for p1 := range old {
+		var skip bool
+		for p2 := range old {
+			if p1 != p2 && strings.HasPrefix(p1, p2) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			paths = append(paths, p1)
+		}
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		return paths[i] < paths[j]
+	})
+	return paths
+}
+
 type dep struct {
-	Selector         string
-	ContentBasedHash bool
+	Selectors          []string
+	NoContentBasedHash bool
 }
 
 func (e *execOp) getMountDeps() ([]dep, error) {
@@ -107,20 +140,17 @@ func (e *execOp) getMountDeps() ([]dep, error) {
 			return nil, errors.Errorf("invalid mountinput %v", m)
 		}
 
-		if m.Selector != "" {
-			deps[m.Input].Selector = path.Join("/", m.Selector)
+		sel := m.Selector
+		if sel != "" {
+			sel = path.Join("/", sel)
 		}
+		deps[m.Input].Selectors = append(deps[m.Input].Selectors, sel)
 
-		if m.Readonly && m.Dest != pb.RootMount { // exclude read-only rootfs
-			deps[m.Input].ContentBasedHash = true
+		if !m.Readonly || m.Dest == pb.RootMount { // exclude read-only rootfs
+			deps[m.Input].NoContentBasedHash = true
 		}
 	}
 	return deps, nil
-}
-
-type output struct {
-	immutable cache.ImmutableRef
-	mutable   cache.MutableRef
 }
 
 func (e *execOp) Exec(ctx context.Context, inputs []solver.Result) ([]solver.Result, error) {
@@ -145,11 +175,11 @@ func (e *execOp) Exec(ctx context.Context, inputs []solver.Result) ([]solver.Res
 				return nil, errors.Errorf("missing input %d", m.Input)
 			}
 			inp := inputs[int(m.Input)]
-			var ok bool
-			ref, ok = inp.Sys().(cache.ImmutableRef)
+			workerRef, ok := inp.Sys().(*llb.WorkerRef)
 			if !ok {
-				return nil, errors.Errorf("invalid reference for exec %T", inputs[int(m.Input)])
+				return nil, errors.Errorf("invalid reference for exec %T", inp.Sys())
 			}
+			ref = workerRef.ImmutableRef
 			mountable = ref
 		}
 		if m.Output != pb.SkipOutput {
@@ -201,9 +231,9 @@ func (e *execOp) Exec(ctx context.Context, inputs []solver.Result) ([]solver.Res
 			if err != nil {
 				return nil, errors.Wrapf(err, "error committing %s", mutable.ID())
 			}
-			refs = append(refs, llb.ImmutableRefToResult(ref))
+			refs = append(refs, llb.NewWorkerRefResult(ref, e.w))
 		} else {
-			refs = append(refs, llb.ImmutableRefToResult(out.(cache.ImmutableRef)))
+			refs = append(refs, llb.NewWorkerRefResult(out.(cache.ImmutableRef), e.w))
 		}
 		outputs[i] = nil
 	}

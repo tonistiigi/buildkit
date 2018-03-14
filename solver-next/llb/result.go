@@ -89,9 +89,12 @@ func (s *cacheResultStorage) Save(res solver.Result) (solver.CacheResult, error)
 	if !ok {
 		return solver.CacheResult{}, errors.Errorf("invalid result: %T", res.Sys())
 	}
-	// if err := ref.ImmutableRef.Finalize(context.TODO()); err != nil {
-	// 	return solver.CacheResult{}, err
-	// }
+	if !cache.HasCachePolicyRetain(ref.ImmutableRef) {
+		if err := cache.CachePolicyRetain(ref.ImmutableRef); err != nil {
+			return solver.CacheResult{}, err
+		}
+		ref.ImmutableRef.Metadata().Commit()
+	}
 	return solver.CacheResult{ID: ref.ID(), CreatedAt: time.Now()}, nil
 }
 func (s *cacheResultStorage) Load(ctx context.Context, res solver.CacheResult) (solver.Result, error) {

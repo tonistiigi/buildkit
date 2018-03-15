@@ -10,13 +10,8 @@ import (
 	"github.com/moby/buildkit/exporter"
 	"github.com/moby/buildkit/frontend"
 	"github.com/moby/buildkit/solver-next"
-	"github.com/moby/buildkit/solver/types"
 	digest "github.com/opencontainers/go-digest"
 )
-
-type SubBuilder interface {
-	SubBuild(ctx context.Context, dgst digest.Digest, req types.SolveRequest) (types.Ref, error)
-}
 
 type Worker interface {
 	// ID needs to be unique in the cluster

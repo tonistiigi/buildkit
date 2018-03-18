@@ -2,20 +2,23 @@ package llb
 
 import (
 	"context"
+	"time"
 
 	"github.com/moby/buildkit/cache"
+	"github.com/moby/buildkit/cache/cacheimport"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/exporter"
 	"github.com/moby/buildkit/frontend"
 	"github.com/moby/buildkit/session"
 	solver "github.com/moby/buildkit/solver-next"
+	"github.com/moby/buildkit/util/progress"
 	"github.com/moby/buildkit/worker"
 	"github.com/pkg/errors"
 )
 
 type ExporterRequest struct {
-	Exporter       exporter.ExporterInstance
-	ExportCacheRef string
+	Exporter      exporter.ExporterInstance
+	CacheExporter *cacheimport.RegistryCacheExporter
 }
 
 // ResolveWorkerFunc returns default worker for the temporary default non-distributed use cases
@@ -25,7 +28,6 @@ type Solver struct {
 	solver        *solver.JobList // TODO: solver.Solver
 	resolveWorker ResolveWorkerFunc
 	frontends     map[string]frontend.Frontend
-	// ce            *cacheimport.CacheExporter
 	// ci            *cacheimport.CacheImporter
 }
 
@@ -95,33 +97,27 @@ func (s *Solver) Solve(ctx context.Context, id string, req frontend.SolveRequest
 			immutable = workerRef.ImmutableRef
 		}
 
-		// if err := inVertexContext(ctx, exp.Name(), func(ctx context.Context) error {
-		//
-		// }); err != nil {
-		// 	return err
-		// }
-
-		return exp.Export(ctx, immutable, exporterOpt)
+		if err := j.Call(ctx, exp.Name(), func(ctx context.Context) error {
+			return exp.Export(ctx, immutable, exporterOpt)
+		}); err != nil {
+			return err
+		}
 	}
 
-	// if exportName := req.ExportCacheRef; exportName != "" {
-	// 	if err := inVertexContext(ctx, "exporting build cache", func(ctx context.Context) error {
-	// 		cache, err := j.cacheExporter(ref)
-	// 		if err != nil {
-	// 			return err
-	// 		}
-	//
-	// 		records, err := cache.Export(ctx)
-	// 		if err != nil {
-	// 			return err
-	// 		}
-	//
-	// 		// TODO: multiworker
-	// 		return s.ce.Export(ctx, records, exportName)
-	// 	}); err != nil {
-	// 		return err
-	// 	}
-	// }
+	if exp := exp.CacheExporter; exp != nil {
+		if err := j.Call(ctx, "exporting cache", func(ctx context.Context) error {
+			prepareDone := oneOffProgress(ctx, "preparing build cache")
+			records, err := res.Export(ctx, workerRefConverter)
+			prepareDone(err)
+			if err != nil {
+				return err
+			}
+
+			return exp.Export(ctx, records)
+		}); err != nil {
+			return err
+		}
+	}
 
 	return err
 }
@@ -137,5 +133,22 @@ func (s *Solver) Status(ctx context.Context, id string, statusChan chan *client.
 func defaultResolver(wc *worker.Controller) ResolveWorkerFunc {
 	return func() (worker.Worker, error) {
 		return wc.GetDefault()
+	}
+}
+
+func oneOffProgress(ctx context.Context, id string) func(err error) error {
+	pw, _, _ := progress.FromContext(ctx)
+	now := time.Now()
+	st := progress.Status{
+		Started: &now,
+	}
+	pw.Write(id, st)
+	return func(err error) error {
+		// TODO: set error on status
+		now := time.Now()
+		st.Completed = &now
+		pw.Write(id, st)
+		pw.Close()
+		return err
 	}
 }

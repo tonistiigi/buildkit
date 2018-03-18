@@ -56,7 +56,7 @@ func (c *bridgeClient) SessionID() string {
 }
 
 type ref struct {
-	solver.Result
+	solver.CachedResult
 }
 
 func (r *ref) ReadFile(ctx context.Context, fp string) ([]byte, error) {
@@ -68,9 +68,9 @@ func (r *ref) ReadFile(ctx context.Context, fp string) ([]byte, error) {
 }
 
 func (r *ref) getImmutableRef() (cache.ImmutableRef, error) {
-	ref, ok := r.Result.Sys().(*llb.WorkerRef)
+	ref, ok := r.CachedResult.Sys().(*llb.WorkerRef)
 	if !ok {
-		return nil, errors.Errorf("invalid ref: %T", r.Result.Sys())
+		return nil, errors.Errorf("invalid ref: %T", r.CachedResult.Sys())
 	}
 	return ref.ImmutableRef, nil
 }

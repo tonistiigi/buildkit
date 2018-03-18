@@ -11,7 +11,9 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/images"
+	"github.com/docker/distribution/manifest/schema2"
 	"github.com/moby/buildkit/cache"
+	"github.com/moby/buildkit/cache/blobs"
 	"github.com/moby/buildkit/cache/cacheimport"
 	"github.com/moby/buildkit/cache/instructioncache"
 	localcache "github.com/moby/buildkit/cache/instructioncache/local"
@@ -36,6 +38,7 @@ import (
 	"github.com/moby/buildkit/source/local"
 	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
 
@@ -66,7 +69,7 @@ type Worker struct {
 	Exporters     map[string]exporter.Exporter
 	ImageSource   source.Source
 	CacheExporter *cacheimport.CacheExporter // TODO: remove
-	CacheImporter *cacheimport.CacheImporter // TODO: remove
+	// CacheImporter *cacheimport.CacheImporter // TODO: remove
 	// no frontend here
 }
 
@@ -190,13 +193,13 @@ func NewWorker(opt WorkerOpt) (*Worker, error) {
 		Differ:         opt.Differ,
 	})
 
-	ci := cacheimport.NewCacheImporter(cacheimport.ImportOpt{
-		Snapshotter:    opt.Snapshotter,
-		ContentStore:   opt.ContentStore,
-		Applier:        opt.Applier,
-		CacheAccessor:  cm,
-		SessionManager: opt.SessionManager,
-	})
+	// ci := cacheimport.NewCacheImporter(cacheimport.ImportOpt{
+	// 	Snapshotter:    opt.Snapshotter,
+	// 	ContentStore:   opt.ContentStore,
+	// 	Applier:        opt.Applier,
+	// 	CacheAccessor:  cm,
+	// 	SessionManager: opt.SessionManager,
+	// })
 
 	return &Worker{
 		WorkerOpt:     opt,
@@ -206,7 +209,7 @@ func NewWorker(opt WorkerOpt) (*Worker, error) {
 		Exporters:     exporters,
 		ImageSource:   is,
 		CacheExporter: ce,
-		CacheImporter: ci,
+		// CacheImporter: ci,
 	}, nil
 }
 
@@ -271,6 +274,38 @@ func (w *Worker) Exporter(name string) (exporter.Exporter, error) {
 		return nil, errors.Errorf("exporter %q could not be found", name)
 	}
 	return exp, nil
+}
+
+func (w *Worker) GetRemote(ctx context.Context, ref cache.ImmutableRef) (*solver.Remote, error) {
+	diffPairs, err := blobs.GetDiffPairs(ctx, w.ContentStore, w.Snapshotter, w.Differ, ref)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed calculaing diff pairs for exported snapshot")
+	}
+	if len(diffPairs) == 0 {
+		return nil, nil
+	}
+
+	descs := make([]ocispec.Descriptor, len(diffPairs))
+
+	for i, dp := range diffPairs {
+		info, err := w.ContentStore.Info(ctx, dp.Blobsum)
+		if err != nil {
+			return nil, err
+		}
+		descs[len(diffPairs)-1-i] = ocispec.Descriptor{
+			Digest:    dp.Blobsum,
+			Size:      info.Size,
+			MediaType: schema2.MediaTypeLayer,
+			Annotations: map[string]string{
+				"containerd.io/uncompressed": dp.DiffID.String(),
+			},
+		}
+	}
+
+	return &solver.Remote{
+		Descriptors: descs,
+		Provider:    w.ContentStore,
+	}, nil
 }
 
 func (w *Worker) InstructionCache() instructioncache.InstructionCache {

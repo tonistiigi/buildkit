@@ -21,7 +21,7 @@ type llbBridge struct {
 	resolveWorker func() (worker.Worker, error)
 }
 
-func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest) (res solver.Result, exp map[string][]byte, err error) {
+func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest) (res solver.CachedResult, exp map[string][]byte, err error) {
 	if req.Definition != nil && req.Definition.Def != nil {
 		edge, err := Load(req.Definition) // TODO: append cache
 		if err != nil {

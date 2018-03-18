@@ -312,7 +312,7 @@ func newController(c *cli.Context, root string) (*control.Controller, error) {
 	// way to pull data into specific worker yet we currently set them up
 	// as part of default worker
 	var ce *cacheimport.CacheExporter
-	var ci *cacheimport.CacheImporter
+	// var ci *cacheimport.CacheImporter
 
 	w, err := wc.GetDefault()
 	if err != nil {
@@ -321,7 +321,7 @@ func newController(c *cli.Context, root string) (*control.Controller, error) {
 
 	wt := w.(*base.Worker)
 	ce = wt.CacheExporter
-	ci = wt.CacheImporter
+	// ci = wt.CacheImporter
 
 	cacheStorage, err := boltdbcachestorage.NewStore(filepath.Join(root, "cache.db"))
 	if err != nil {
@@ -333,8 +333,8 @@ func newController(c *cli.Context, root string) (*control.Controller, error) {
 		WorkerController: wc,
 		Frontends:        frontends,
 		CacheExporter:    ce,
-		CacheImporter:    ci,
-		CacheKeyStorage:  cacheStorage,
+		// CacheImporter:    ci,
+		CacheKeyStorage: cacheStorage,
 	})
 }
 

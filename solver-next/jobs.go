@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/util/flightcontrol"
 	"github.com/moby/buildkit/util/progress"
@@ -421,6 +422,11 @@ func (j *Job) Discard() error {
 	return nil
 }
 
+func (j *Job) Call(ctx context.Context, name string, fn func(ctx context.Context) error) error {
+	ctx = progress.WithProgress(ctx, j.pw)
+	return inVertexContext(ctx, name, fn)
+}
+
 type activeOp interface {
 	Op
 	IgnoreCache() bool
@@ -680,4 +686,17 @@ func notifyCompleted(ctx context.Context, v *client.Vertex, err error) {
 		v.Error = err.Error()
 	}
 	pw.Write(v.Digest.String(), *v)
+}
+
+func inVertexContext(ctx context.Context, name string, f func(ctx context.Context) error) error {
+	v := client.Vertex{
+		Digest: digest.FromBytes([]byte(identity.NewID())),
+		Name:   name,
+	}
+	pw, _, ctx := progress.FromContext(ctx, progress.WithMetadata("vertex", v.Digest))
+	notifyStarted(ctx, &v)
+	defer pw.Close()
+	err := f(ctx)
+	notifyCompleted(ctx, &v, err)
+	return err
 }

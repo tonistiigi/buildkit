@@ -14,7 +14,7 @@ func NewDockerfileFrontend() frontend.Frontend {
 
 type dfFrontend struct{}
 
-func (f *dfFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBridge, opts map[string]string) (retRef solver.Result, exporterAttr map[string][]byte, retErr error) {
+func (f *dfFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBridge, opts map[string]string) (retRef solver.CachedResult, exporterAttr map[string][]byte, retErr error) {
 
 	c, err := llbBridgeToGatewayClient(ctx, llbBridge, opts)
 	if err != nil {
@@ -33,7 +33,7 @@ func (f *dfFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBr
 		return nil, nil, err
 	}
 
-	if c.final == nil || c.final.Result == nil {
+	if c.final == nil || c.final.CachedResult == nil {
 		return nil, c.exporterAttr, nil
 	}
 

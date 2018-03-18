@@ -136,3 +136,12 @@ func parseWorkerRef(id string) (string, string, error) {
 	}
 	return parts[0], parts[1], nil
 }
+
+func workerRefConverter(ctx context.Context, res solver.Result) (*solver.Remote, error) {
+	ref, ok := res.Sys().(*WorkerRef)
+	if !ok {
+		return nil, errors.Errorf("invalid result: %T", res.Sys())
+	}
+
+	return ref.Worker.GetRemote(ctx, ref.ImmutableRef)
+}

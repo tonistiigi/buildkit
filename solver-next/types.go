@@ -75,11 +75,11 @@ type Remote struct {
 
 // CacheLink is a link between two cache records
 type CacheLink struct {
-	Source   digest.Digest
-	Input    Index
-	Output   Index
-	Base     digest.Digest
-	Selector digest.Digest
+	Source   digest.Digest `json:",omitempty"`
+	Input    Index         `json:",omitempty"`
+	Output   Index         `json:",omitempty"`
+	Base     digest.Digest `json:",omitempty"`
+	Selector digest.Digest `json:",omitempty"`
 }
 
 // Op is an implementation for running a vertex

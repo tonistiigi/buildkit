@@ -54,8 +54,7 @@ func filterPrefix(opts map[string]string, pfx string) map[string]string {
 	return m
 }
 
-func (gf *gatewayFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBridge, opts map[string]string) (retRef solver.Result, exporterAttr map[string][]byte, retErr error) {
-
+func (gf *gatewayFrontend) Solve(ctx context.Context, llbBridge frontend.FrontendLLBBridge, opts map[string]string) (retRef solver.CachedResult, exporterAttr map[string][]byte, retErr error) {
 	source, ok := opts[keySource]
 	if !ok {
 		return nil, nil, errors.Errorf("no source specified for gateway")
@@ -253,7 +252,7 @@ type llbBridgeForwarder struct {
 	callCtx      context.Context
 	llbBridge    frontend.FrontendLLBBridge
 	refs         map[string]solver.Result
-	lastRef      solver.Result
+	lastRef      solver.CachedResult
 	exporterAttr map[string][]byte
 	*pipe
 }

@@ -27,7 +27,7 @@ type Opt struct {
 	Frontends        map[string]frontend.Frontend
 	CacheKeyStorage  solver.CacheKeyStorage
 	CacheExporter    *cacheimport.CacheExporter
-	CacheImporter    *cacheimport.CacheImporter
+	// CacheImporter    *cacheimport.CacheImporter
 }
 
 type Controller struct { // TODO: ControlService
@@ -150,13 +150,15 @@ func (c *Controller) Solve(ctx netcontext.Context, req *controlapi.SolveRequest)
 		}
 	}
 
-	exportCacheRef := ""
+	var cacheExporter *cacheimport.RegistryCacheExporter
 	if ref := req.Cache.ExportRef; ref != "" {
 		parsed, err := reference.ParseNormalizedNamed(ref)
 		if err != nil {
 			return nil, err
 		}
-		exportCacheRef = reference.TagNameOnly(parsed).String()
+		exportCacheRef := reference.TagNameOnly(parsed).String()
+
+		cacheExporter = c.opt.CacheExporter.ExporterForTarget(exportCacheRef)
 	}
 
 	importCacheRef := ""
@@ -174,8 +176,8 @@ func (c *Controller) Solve(ctx netcontext.Context, req *controlapi.SolveRequest)
 		FrontendOpt:    req.FrontendAttrs,
 		ImportCacheRef: importCacheRef,
 	}, llb.ExporterRequest{
-		Exporter:       expi,
-		ExportCacheRef: exportCacheRef,
+		Exporter:      expi,
+		CacheExporter: cacheExporter,
 	}); err != nil {
 		return nil, err
 	}

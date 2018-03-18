@@ -10,6 +10,7 @@ import (
 	"github.com/moby/buildkit/identity"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -104,7 +105,7 @@ func (ce *cacheExporter) Export(ctx context.Context, m map[digest.Digest]*Export
 		}
 	}
 
-	if res != nil && remote == nil {
+	if res != nil && remote == nil && len(ce.Deps()) > 0 {
 		remote, err = converter(ctx, res)
 		if err != nil {
 			return nil, err
@@ -115,6 +116,8 @@ func (ce *cacheExporter) Export(ctx context.Context, m map[digest.Digest]*Export
 	if remote != nil && len(remote.Descriptors) > 0 && remote.Descriptors[0].Digest != "" {
 		cacheID = remote.Descriptors[0].Digest
 	}
+
+	logrus.Debugf("export %s %d", cacheID, len(ce.Deps()))
 
 	rec, ok := m[cacheID]
 	if !ok {
@@ -210,6 +213,9 @@ func (c *inMemoryCacheManager) Query(deps []CacheKeyWithSelector, input Index, d
 	}
 
 	formatDeps := func(deps []dep, index int) []CacheKeyWithSelector {
+		if len(deps) == 0 {
+			return nil
+		}
 		keys := make([]CacheKeyWithSelector, index+1)
 		if len(deps) == 1 {
 			keys[index] = deps[0].key

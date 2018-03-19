@@ -27,7 +27,7 @@ type Opt struct {
 	Frontends        map[string]frontend.Frontend
 	CacheKeyStorage  solver.CacheKeyStorage
 	CacheExporter    *cacheimport.CacheExporter
-	// CacheImporter    *cacheimport.CacheImporter
+	CacheImporter    *cacheimport.CacheImporter
 }
 
 type Controller struct { // TODO: ControlService
@@ -36,7 +36,7 @@ type Controller struct { // TODO: ControlService
 }
 
 func NewController(opt Opt) (*Controller, error) {
-	solver := llb.New(opt.WorkerController, opt.Frontends, opt.CacheKeyStorage)
+	solver := llb.New(opt.WorkerController, opt.Frontends, opt.CacheKeyStorage, opt.CacheImporter)
 
 	c := &Controller{
 		opt:    opt,

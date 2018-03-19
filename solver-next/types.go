@@ -54,9 +54,14 @@ type CachedResult interface {
 	Export(ctx context.Context, converter func(context.Context, Result) (*Remote, error)) ([]ExportRecord, error)
 }
 
+type ExporterAccumulator struct {
+	Records map[digest.Digest]*ExportRecord
+	Visited map[interface{}]struct{}
+}
+
 // Exporter can export the artifacts of the build chain
 type Exporter interface {
-	Export(ctx context.Context, m map[digest.Digest]*ExportRecord, converter func(context.Context, Result) (*Remote, error)) (*ExportRecord, error)
+	Export(ctx context.Context, m *ExporterAccumulator, converter func(context.Context, Result) (*Remote, error)) ([]*ExportRecord, error)
 }
 
 // ExportRecord defines a single record in the exported cache chain
@@ -68,6 +73,7 @@ type ExportRecord struct {
 
 // Remote is a descriptor or a list of stacked descriptors that can be pulled
 // from a content provider
+// TODO: add closer to keep referenced data from getting deleted
 type Remote struct {
 	Descriptors []ocispec.Descriptor
 	Provider    content.Provider

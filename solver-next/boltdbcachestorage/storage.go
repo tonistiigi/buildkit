@@ -328,7 +328,71 @@ func (s *Store) WalkLinks(id string, link solver.CacheInfoLink, fn func(id strin
 	return nil
 }
 
+func (s *Store) WalkBacklinkRoots(id string, fn func(id string, link solver.CacheInfoLink) error) error {
+	var outIDs []string
+	var outLinks []solver.CacheInfoLink
+
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		links := tx.Bucket([]byte(linksBucket))
+		if links == nil {
+			return nil
+		}
+		backLinks := tx.Bucket([]byte(backlinksBucket))
+		if backLinks == nil {
+			return nil
+		}
+		b := backLinks.Bucket([]byte(id))
+		if b == nil {
+			return nil
+		}
+
+		if err := b.ForEach(func(bid, v []byte) error {
+			if !isEmptyBucket(backLinks.Bucket(bid)) {
+				return nil
+			}
+			b = links.Bucket(bid)
+			if b == nil {
+				return nil
+			}
+			if err := b.ForEach(func(k, v []byte) error {
+				parts := bytes.Split(k, []byte("@"))
+				if len(parts) != 2 {
+					if string(parts[1]) != id {
+						return nil
+					}
+					var l solver.CacheInfoLink
+					if err := json.Unmarshal(parts[0], l); err != nil {
+						return err
+					}
+					outIDs = append(outIDs, string(bid))
+					outLinks = append(outLinks, l)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	for i := range outIDs {
+		if err := fn(outIDs[i], outLinks[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func isEmptyBucket(b *bolt.Bucket) bool {
+	if b == nil {
+		return true
+	}
 	k, _ := b.Cursor().First()
 	return k == nil
 }

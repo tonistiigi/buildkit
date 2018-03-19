@@ -1,42 +1,29 @@
-//+build ignore
-
 package cacheimport
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
-	"github.com/containerd/containerd/rootfs"
-	cdsnapshot "github.com/containerd/containerd/snapshots"
-	"github.com/moby/buildkit/cache"
-	"github.com/moby/buildkit/cache/blobs"
-	"github.com/moby/buildkit/cache/instructioncache"
 	"github.com/moby/buildkit/client"
-	buildkitidentity "github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth"
-	"github.com/moby/buildkit/snapshot"
+	solver "github.com/moby/buildkit/solver-next"
+	"github.com/moby/buildkit/util/contentutil"
 	"github.com/moby/buildkit/util/progress"
+	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
-	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
-	"golang.org/x/sync/errgroup"
 )
 
 type ImportOpt struct {
 	SessionManager *session.Manager
-	ContentStore   content.Store
-	Snapshotter    snapshot.Snapshotter
-	Applier        diff.Applier
-	CacheAccessor  cache.Accessor
+	Worker         worker.Worker // TODO: remove. This sets the worker where the cache is imported to. Should be passed on load instead.
 }
 
 func NewCacheImporter(opt ImportOpt) *CacheImporter {
@@ -45,6 +32,130 @@ func NewCacheImporter(opt ImportOpt) *CacheImporter {
 
 type CacheImporter struct {
 	opt ImportOpt
+}
+
+type cacheKeyStorage struct {
+	allLayers map[digest.Digest]ocispec.Descriptor
+	byID      map[string]*parsedConfigItem
+}
+
+func (cs *cacheKeyStorage) Exists(id string) bool {
+	_, ok := cs.byID[id]
+	return ok
+}
+
+func (cs *cacheKeyStorage) Walk(func(id string) error) error {
+	return nil
+}
+
+func (cs *cacheKeyStorage) WalkResults(id string, fn func(solver.CacheResult) error) error {
+	_, ok := cs.byID[id]
+	if !ok {
+		return nil
+	}
+	return fn(solver.CacheResult{ID: id}) // TODO: CreatedAt
+}
+
+func (cs *cacheKeyStorage) Load(id string, resultID string) (solver.CacheResult, error) {
+	_, ok := cs.byID[id]
+	if !ok {
+		return solver.CacheResult{}, nil
+	}
+	return solver.CacheResult{ID: id}, nil
+}
+
+func (cs *cacheKeyStorage) AddResult(id string, res solver.CacheResult) error {
+	return nil
+}
+
+func (cs *cacheKeyStorage) Release(resultID string) error {
+	return nil
+}
+func (cs *cacheKeyStorage) AddLink(id string, link solver.CacheInfoLink, target string) error {
+	return nil
+}
+func (cs *cacheKeyStorage) WalkLinks(id string, link solver.CacheInfoLink, fn func(id string) error) error {
+	c, ok := cs.byID[id]
+	if !ok {
+		return nil
+	}
+	for l := range c.Links {
+		if l.Input == link.Input && l.Base == link.Digest && l.Output == link.Output && l.Selector == link.Selector {
+			if err := fn(l.Target.String()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+func (cs *cacheKeyStorage) WalkBacklinkRoots(id string, fn func(id string, link solver.CacheInfoLink) error) error {
+	return nil
+}
+
+type cacheResultStorage struct {
+	w         worker.Worker
+	allLayers map[digest.Digest]ocispec.Descriptor
+	byID      map[string]*parsedConfigItem
+	f         remotes.Fetcher
+}
+
+func (cs *cacheResultStorage) Save(res solver.Result) (solver.CacheResult, error) {
+	return solver.CacheResult{}, errors.Errorf("importer is immutable")
+}
+
+func (cs *cacheResultStorage) Load(ctx context.Context, res solver.CacheResult) (solver.Result, error) {
+	remote, err := cs.LoadRemote(ctx, res)
+	if err != nil {
+		return nil, err
+	}
+	ref, err := cs.w.FromRemote(ctx, remote)
+	if err != nil {
+		return nil, err
+	}
+	return worker.NewWorkerRefResult(ref, cs.w), nil
+}
+
+func (cs *cacheResultStorage) LoadRemote(ctx context.Context, res solver.CacheResult) (*solver.Remote, error) {
+	var descs []ocispec.Descriptor
+	provider := contentutil.NewMultiProvider(nil)
+
+	dgst := digest.Digest(res.ID)
+
+	for {
+		if dgst == "" {
+			break
+		}
+		desc, ok := cs.allLayers[dgst]
+		if !ok {
+			return nil, errors.WithStack(solver.ErrNotFound)
+		}
+		provider.Add(desc.Digest, contentutil.FromFetcher(cs.f, desc))
+		descs = append(descs, desc)
+		cfg, ok := cs.byID[dgst.String()]
+		if !ok {
+			break
+		}
+		dgst = cfg.Parent
+	}
+
+	if len(descs) == 0 {
+		return nil, errors.WithStack(solver.ErrNotFound)
+	}
+
+	// reverse
+	for left, right := 0, len(descs)-1; left < right; left, right = left+1, right-1 {
+		descs[left], descs[right] = descs[right], descs[left]
+	}
+
+	return &solver.Remote{
+		Descriptors: descs,
+		Provider:    provider,
+	}, nil
+}
+
+func (cs *cacheResultStorage) Exists(id string) bool {
+	_, ok := cs.allLayers[digest.Digest(id)]
+	return ok
 }
 
 func (ci *CacheImporter) getCredentialsFromSession(ctx context.Context) func(string) (string, string, error) {
@@ -66,7 +177,7 @@ func (ci *CacheImporter) getCredentialsFromSession(ctx context.Context) func(str
 	}
 }
 
-func (ci *CacheImporter) pull(ctx context.Context, ref string) (*ocispec.Descriptor, remotes.Fetcher, error) {
+func (ci *CacheImporter) Resolve(ctx context.Context, ref string) (solver.CacheManager, error) {
 	resolver := docker.NewResolver(docker.ResolverOptions{
 		Client:      http.DefaultClient,
 		Credentials: ci.getCredentialsFromSession(ctx),
@@ -74,28 +185,22 @@ func (ci *CacheImporter) pull(ctx context.Context, ref string) (*ocispec.Descrip
 
 	ref, desc, err := resolver.Resolve(ctx, ref)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	fetcher, err := resolver.Fetcher(ctx, ref)
 	if err != nil {
-		return nil, nil, err
-	}
-
-	if _, err := remotes.FetchHandler(ci.opt.ContentStore, fetcher)(ctx, desc); err != nil {
-		return nil, nil, err
-	}
-
-	return &desc, fetcher, err
-}
-
-func (ci *CacheImporter) Import(ctx context.Context, ref string) (instructioncache.InstructionCache, error) {
-	desc, fetcher, err := ci.pull(ctx, ref)
-	if err != nil {
 		return nil, err
 	}
 
-	dt, err := content.ReadBlob(ctx, ci.opt.ContentStore, desc.Digest)
+	b := contentutil.NewBuffer()
+
+	// TODO: do this directly
+	if _, err := remotes.FetchHandler(b, fetcher)(ctx, desc); err != nil {
+		return nil, err
+	}
+
+	dt, err := content.ReadBlob(ctx, b, desc.Digest)
 	if err != nil {
 		return nil, err
 	}
@@ -105,10 +210,7 @@ func (ci *CacheImporter) Import(ctx context.Context, ref string) (instructioncac
 		return nil, err
 	}
 
-	allDesc := map[digest.Digest]ocispec.Descriptor{}
-	allBlobs := map[digest.Digest]configItem{}
-	byCacheKey := map[digest.Digest]configItem{}
-	byContentKey := map[digest.Digest][]digest.Digest{}
+	allLayers := map[digest.Digest]ocispec.Descriptor{}
 
 	var configDesc ocispec.Descriptor
 
@@ -117,221 +219,65 @@ func (ci *CacheImporter) Import(ctx context.Context, ref string) (instructioncac
 			configDesc = m
 			continue
 		}
-		allDesc[m.Digest] = m
+		allLayers[m.Digest] = m
 	}
 
 	if configDesc.Digest == "" {
-		return nil, errors.Errorf("invalid build cache: %s", ref)
+		return nil, errors.Errorf("invalid build cache from %s", ref)
 	}
 
-	if _, err := remotes.FetchHandler(ci.opt.ContentStore, fetcher)(ctx, configDesc); err != nil {
+	if _, err := remotes.FetchHandler(b, fetcher)(ctx, configDesc); err != nil {
 		return nil, err
 	}
 
-	dt, err = content.ReadBlob(ctx, ci.opt.ContentStore, configDesc.Digest)
+	dt, err = content.ReadBlob(ctx, b, configDesc.Digest)
 	if err != nil {
 		return nil, err
 	}
 
-	var cfg cacheConfig
-	if err := json.Unmarshal(dt, &cfg); err != nil {
+	var cfgJSONs []configItemJSON
+	if err := json.Unmarshal(dt, &cfgJSONs); err != nil {
 		return nil, err
 	}
 
-	for _, ci := range cfg.Items {
-		if ci.Blobsum != "" {
-			allBlobs[ci.Blobsum] = ci
+	configs := map[string]*parsedConfigItem{}
+	for _, ci := range cfgJSONs {
+		configs[ci.Digest.String()] = &parsedConfigItem{
+			Digest: ci.Digest,
+			Parent: ci.Parent,
+			Links:  map[reverseCacheLink]struct{}{},
 		}
-		if ci.CacheKey != "" {
-			byCacheKey[ci.CacheKey] = ci
-			if ci.ContentKey != "" {
-				byContentKey[ci.ContentKey] = append(byContentKey[ci.ContentKey], ci.CacheKey)
+	}
+
+	for _, ci := range cfgJSONs {
+		for _, l := range ci.Links {
+			if l.Source == "" {
+				configs[l.Base.String()] = configs[ci.Digest.String()]
+				continue
 			}
+			configs[l.Source.String()].Links[reverseCacheLink{
+				Target:   ci.Digest,
+				Input:    l.Input,
+				Output:   l.Output,
+				Base:     l.Base,
+				Selector: l.Selector,
+			}] = struct{}{}
 		}
 	}
 
-	return &importInfo{
-		CacheImporter: ci,
-		byCacheKey:    byCacheKey,
-		byContentKey:  byContentKey,
-		allBlobs:      allBlobs,
-		allDesc:       allDesc,
-		fetcher:       fetcher,
-		ref:           ref,
-	}, nil
-}
-
-type importInfo struct {
-	*CacheImporter
-	fetcher      remotes.Fetcher
-	byCacheKey   map[digest.Digest]configItem
-	byContentKey map[digest.Digest][]digest.Digest
-	allDesc      map[digest.Digest]ocispec.Descriptor
-	allBlobs     map[digest.Digest]configItem
-	ref          string
-}
-
-func (ii *importInfo) Probe(ctx context.Context, key digest.Digest) (bool, error) {
-	_, ok := ii.byCacheKey[key]
-	return ok, nil
-}
-
-func (ii *importInfo) getChain(dgst digest.Digest) ([]blobs.DiffPair, error) {
-	cfg, ok := ii.allBlobs[dgst]
-	if !ok {
-		return nil, errors.Errorf("blob %s not found in cache", dgst)
-	}
-	parent := cfg.Parent
-
-	var out []blobs.DiffPair
-	if parent != "" {
-		parentChain, err := ii.getChain(parent)
-		if err != nil {
-			return nil, err
-		}
-		out = parentChain
-	}
-	return append(out, blobs.DiffPair{Blobsum: dgst, DiffID: cfg.DiffID}), nil
-}
-
-func (ii *importInfo) Lookup(ctx context.Context, key digest.Digest, msg string) (interface{}, error) {
-	desc, ok := ii.byCacheKey[key]
-	if !ok || desc.Blobsum == "" {
-		return nil, nil
-	}
-	var out interface{}
-	if err := inVertexContext(ctx, fmt.Sprintf("cache from %s for %s", ii.ref, msg), func(ctx context.Context) error {
-
-		ch, err := ii.getChain(desc.Blobsum)
-		if err != nil {
-			return err
-		}
-		res, err := ii.fetch(ctx, ch)
-		if err != nil {
-			return err
-		}
-		out = res
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (ii *importInfo) Set(key digest.Digest, ref interface{}) error {
-	return nil
-}
-
-func (ii *importInfo) SetContentMapping(contentKey, key digest.Digest) error {
-	return nil
-}
-
-func (ii *importInfo) GetContentMapping(dgst digest.Digest) ([]digest.Digest, error) {
-	dgsts, ok := ii.byContentKey[dgst]
-	if !ok {
-		return nil, nil
-	}
-	return dgsts, nil
-}
-
-func (ii *importInfo) fetch(ctx context.Context, chain []blobs.DiffPair) (cache.ImmutableRef, error) {
-	eg, ctx := errgroup.WithContext(ctx)
-	for _, dp := range chain {
-		func(dp blobs.DiffPair) {
-			eg.Go(func() error {
-				desc, ok := ii.allDesc[dp.Blobsum]
-				if !ok {
-					return errors.Errorf("failed to find %s for fetch", dp.Blobsum)
-				}
-				if _, err := remotes.FetchHandler(ii.opt.ContentStore, ii.fetcher)(ctx, desc); err != nil {
-					return err
-				}
-				return nil
-			})
-		}(dp)
-	}
-	if err := eg.Wait(); err != nil {
-		return nil, err
+	keysStorage := &cacheKeyStorage{
+		allLayers: allLayers,
+		byID:      configs,
 	}
 
-	chainid, err := ii.unpack(ctx, chain)
-	if err != nil {
-		return nil, err
+	resultStorage := &cacheResultStorage{
+		w:         ci.opt.Worker,
+		f:         fetcher,
+		allLayers: allLayers,
+		byID:      configs,
 	}
 
-	return ii.opt.CacheAccessor.Get(ctx, chainid, cache.WithDescription("imported cache")) // TODO: more descriptive name
-}
-
-func (ii *importInfo) unpack(ctx context.Context, dpairs []blobs.DiffPair) (string, error) {
-	layers, err := ii.getLayers(ctx, dpairs)
-	if err != nil {
-		return "", err
-	}
-
-	var chain []digest.Digest
-	for _, layer := range layers {
-		labels := map[string]string{
-			"containerd.io/uncompressed": layer.Diff.Digest.String(),
-		}
-		if _, err := rootfs.ApplyLayer(ctx, layer, chain, ii.opt.Snapshotter, ii.opt.Applier, cdsnapshot.WithLabels(labels)); err != nil {
-			return "", err
-		}
-		chain = append(chain, layer.Diff.Digest)
-	}
-	chainID := identity.ChainID(chain)
-
-	if err := ii.fillBlobMapping(ctx, layers); err != nil {
-		return "", err
-	}
-
-	return string(chainID), nil
-}
-
-func (ii *importInfo) fillBlobMapping(ctx context.Context, layers []rootfs.Layer) error {
-	var chain []digest.Digest
-	for _, l := range layers {
-		chain = append(chain, l.Diff.Digest)
-		chainID := identity.ChainID(chain)
-		if err := ii.opt.Snapshotter.SetBlob(ctx, string(chainID), l.Diff.Digest, l.Blob.Digest); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (ii *importInfo) getLayers(ctx context.Context, dpairs []blobs.DiffPair) ([]rootfs.Layer, error) {
-	layers := make([]rootfs.Layer, len(dpairs))
-	for i := range dpairs {
-		layers[i].Diff = ocispec.Descriptor{
-			// TODO: derive media type from compressed type
-			MediaType: ocispec.MediaTypeImageLayer,
-			Digest:    dpairs[i].DiffID,
-		}
-		info, err := ii.opt.ContentStore.Info(ctx, dpairs[i].Blobsum)
-		if err != nil {
-			return nil, err
-		}
-		layers[i].Blob = ocispec.Descriptor{
-			// TODO: derive media type from compressed type
-			MediaType: ocispec.MediaTypeImageLayerGzip,
-			Digest:    dpairs[i].Blobsum,
-			Size:      info.Size,
-		}
-	}
-	return layers, nil
-}
-
-func inVertexContext(ctx context.Context, name string, f func(ctx context.Context) error) error {
-	v := client.Vertex{
-		Digest: digest.FromBytes([]byte(buildkitidentity.NewID())),
-		Name:   name,
-	}
-	pw, _, ctx := progress.FromContext(ctx, progress.WithMetadata("vertex", v.Digest))
-	notifyStarted(ctx, &v)
-	defer pw.Close()
-	err := f(ctx)
-	notifyCompleted(ctx, &v, err)
-	return err
+	return solver.NewCacheManager(ref, keysStorage, resultStorage), nil
 }
 
 func notifyStarted(ctx context.Context, v *client.Vertex) {
@@ -356,4 +302,18 @@ func notifyCompleted(ctx context.Context, v *client.Vertex, err error) {
 		v.Error = err.Error()
 	}
 	pw.Write(v.Digest.String(), *v)
+}
+
+type parsedConfigItem struct {
+	Digest digest.Digest
+	Parent digest.Digest
+	Links  map[reverseCacheLink]struct{}
+}
+
+type reverseCacheLink struct {
+	Target   digest.Digest
+	Input    solver.Index
+	Output   solver.Index
+	Base     digest.Digest
+	Selector digest.Digest
 }

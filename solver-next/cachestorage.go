@@ -22,6 +22,7 @@ type CacheKeyStorage interface {
 
 	AddLink(id string, link CacheInfoLink, target string) error
 	WalkLinks(id string, link CacheInfoLink, fn func(id string) error) error
+	WalkBacklinkRoots(id string, fn func(id string, link CacheInfoLink) error) error
 }
 
 // CacheResult is a record for a single solve result

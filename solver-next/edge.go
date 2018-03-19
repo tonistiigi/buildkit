@@ -2,6 +2,7 @@ package solver
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/moby/buildkit/solver-next/internal/pipe"
@@ -419,11 +420,13 @@ func (e *edge) processUpdate(upt pipe.Receiver) (depChanged bool) {
 				}
 			} else if !dep.slowCacheComplete {
 				k := NewCacheKey(upt.Status().Value.(digest.Digest), -1, nil)
+				slowKeyExp := CacheKeyWithSelector{CacheKey: ExportableCacheKey{CacheKey: k, Exporter: &emptyExporter{CacheKey: k}}}
+				defKeyExp := CacheKeyWithSelector{CacheKey: dep.result.CacheKey(), Selector: e.cacheMap.Deps[i].Selector}
 				ck := NewCacheKey("", 0, []CacheKeyWithSelector{
-					{CacheKey: dep.result.CacheKey(), Selector: e.cacheMap.Deps[i].Selector},
-					{CacheKey: ExportableCacheKey{CacheKey: k, Exporter: &emptyExporter{k}}, Selector: NoSelector},
+					defKeyExp,
+					slowKeyExp,
 				})
-				dep.slowCacheKey = &ExportableCacheKey{ck, &emptyExporter{ck}}
+				dep.slowCacheKey = &ExportableCacheKey{ck, &mergedExporter{exporters: []Exporter{defKeyExp.CacheKey.Exporter, slowKeyExp.CacheKey.Exporter}}}
 				dep.slowCacheFoundKey = e.probeCache(dep, []CacheKeyWithSelector{{CacheKey: ExportableCacheKey{CacheKey: *dep.slowCacheKey}}})
 				dep.slowCacheComplete = true
 				e.keysDidChange = true
@@ -735,7 +738,7 @@ func (e *edge) loadCache(ctx context.Context) (interface{}, error) {
 // execOp creates a request to execute the vertex operation
 func (e *edge) execOp(ctx context.Context) (interface{}, error) {
 	cacheKey, inputs := e.commitOptions()
-	results, err := e.op.Exec(ctx, toResultSlice(inputs))
+	results, subExporters, err := e.op.Exec(ctx, toResultSlice(inputs))
 	if err != nil {
 		return nil, err
 	}
@@ -756,7 +759,7 @@ func (e *edge) execOp(ctx context.Context) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewCachedResult(res, ck, ck), nil
+	return NewCachedResult(res, ck, &mergedExporter{exporters: append([]Exporter{ck}, subExporters...)}), nil
 }
 
 func toResultSlice(cres []CachedResult) (out []Result) {
@@ -769,11 +772,15 @@ func toResultSlice(cres []CachedResult) (out []Result) {
 
 type emptyExporter struct {
 	CacheKey
+	id digest.Digest
 }
 
-func (e *emptyExporter) Export(ctx context.Context, m map[digest.Digest]*ExportRecord, fn func(context.Context, Result) (*Remote, error)) (*ExportRecord, error) {
-
-	id := getUniqueID(e.CacheKey)
+func (e *emptyExporter) Export(ctx context.Context, acc *ExporterAccumulator, fn func(context.Context, Result) (*Remote, error)) ([]*ExportRecord, error) {
+	if _, ok := acc.Visited[e]; ok {
+		return []*ExportRecord{acc.Records[e.id]}, nil
+	}
+	m := acc.Records
+	id := digest.FromBytes([]byte(fmt.Sprintf("%s@%d", e.Digest(), e.Output())))
 	rec, ok := m[id]
 	if !ok {
 		rec = &ExportRecord{Digest: id, Links: map[CacheLink]struct{}{}}
@@ -781,42 +788,51 @@ func (e *emptyExporter) Export(ctx context.Context, m map[digest.Digest]*ExportR
 	}
 
 	deps := e.CacheKey.Deps()
-
-	for i, dep := range deps {
-		r, err := dep.CacheKey.Export(ctx, m, fn)
-		if err != nil {
-			return nil, err
-		}
-		link := CacheLink{
-			Source:   r.Digest,
-			Input:    Index(i),
-			Output:   e.Output(),
-			Base:     e.Digest(),
-			Selector: dep.Selector,
-		}
-		rec.Links[link] = struct{}{}
+	if len(deps) > 0 {
+		return nil, errors.Errorf("deps not supported")
 	}
+
+	// for i, dep := range deps {
+	// 	recs, err := dep.CacheKey.Export(ctx, m, fn)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	for _, r := range recs {
+	// 		link := CacheLink{
+	// 			Source:   r.Digest,
+	// 			Input:    Index(i),
+	// 			Output:   e.Output(),
+	// 			Base:     e.Digest(),
+	// 			Selector: dep.Selector,
+	// 		}
+	// 		rec.Links[link] = struct{}{}
+	// 	}
+	// }
 
 	if len(deps) == 0 {
 		m[id].Links[CacheLink{
-			Output: e.Output(),
-			Base:   e.Digest(),
+			// Output: e.Output(),
+			Output: -1,
+			Base:   id,
 		}] = struct{}{}
 	}
+	e.id = id
+	acc.Visited[e] = struct{}{}
 
-	return rec, nil
+	return []*ExportRecord{rec}, nil
 }
 
 type mergedExporter struct {
 	exporters []Exporter
 }
 
-func (e *mergedExporter) Export(ctx context.Context, m map[digest.Digest]*ExportRecord, fn func(context.Context, Result) (*Remote, error)) (er *ExportRecord, err error) {
+func (e *mergedExporter) Export(ctx context.Context, acc *ExporterAccumulator, fn func(context.Context, Result) (*Remote, error)) (er []*ExportRecord, err error) {
 	for _, e := range e.exporters {
-		er, err = e.Export(ctx, m, fn)
+		r, err := e.Export(ctx, acc, fn)
 		if err != nil {
 			return nil, err
 		}
+		er = append(er, r...)
 	}
 	return
 }

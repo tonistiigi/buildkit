@@ -2,6 +2,7 @@ package solver
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -203,6 +204,42 @@ func (s *inMemoryStore) WalkLinks(id string, link CacheInfoLink, fn func(id stri
 
 	for _, t := range links {
 		if err := fn(t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *inMemoryStore) WalkBacklinkRoots(id string, fn func(id string, link CacheInfoLink) error) error {
+	s.mu.RLock()
+	k, ok := s.byID[id]
+	if !ok {
+		s.mu.RUnlock()
+		return nil
+	}
+	var outIDs []string
+	var outLinks []CacheInfoLink
+	for bid := range k.backlinks {
+		b, ok := s.byID[bid]
+		if !ok {
+			continue
+		}
+		if len(b.backlinks) != 0 {
+			continue
+		}
+		for l, m := range b.links {
+			if _, ok := m[id]; !ok {
+				continue
+			}
+			outIDs = append(outIDs, bid)
+			outLinks = append(outLinks, l)
+			fmt.Println("hasback")
+		}
+	}
+	s.mu.RUnlock()
+
+	for i := range outIDs {
+		if err := fn(outIDs[i], outLinks[i]); err != nil {
 			return err
 		}
 	}

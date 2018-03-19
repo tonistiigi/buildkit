@@ -13,7 +13,6 @@ import (
 
 	"github.com/moby/buildkit/identity"
 	digest "github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
@@ -2296,10 +2295,9 @@ func TestCacheExportingPartialSelector(t *testing.T) {
 	rec, err := res.Export(ctx, testConvertToRemote)
 	require.NoError(t, err)
 
-	require.Equal(t, len(rec), 4) // v1 creates 3 records
+	require.Equal(t, len(rec), 3) // v1 creates 3 records
 
 	// repeat so that all coming from cache are retained
-
 	j1, err := l.NewJob("j1")
 	require.NoError(t, err)
 
@@ -2309,25 +2307,98 @@ func TestCacheExportingPartialSelector(t *testing.T) {
 		}
 	}()
 
-	g1 := Edge{
-		Vertex: vtx(vtxOpt{
-			name:         "v2",
-			cacheKeySeed: "seed2",
-			value:        "result2",
-			inputs:       []Edge{g0},
-		},
-		),
-	}
+	g1 := g0
 
 	res, err = j1.Build(ctx, g1)
 	require.NoError(t, err)
-	require.Equal(t, unwrap(res), "result2")
+	require.Equal(t, unwrap(res), "result0")
 
 	require.NoError(t, j1.Discard())
 	j1 = nil
 
-	_, err = res.Export(ctx, testConvertToRemote)
+	rec, err = res.Export(ctx, testConvertToRemote)
 	require.NoError(t, err)
+
+	for i, r := range rec {
+		fmt.Printf("%d %+v\n", i, r)
+	}
+
+	require.Equal(t, len(rec), 3) // same
+
+	// repeat with forcing a slow key recomputation
+	j2, err := l.NewJob("j2")
+	require.NoError(t, err)
+
+	defer func() {
+		if j2 != nil {
+			j2.Discard()
+		}
+	}()
+
+	g2 := Edge{
+		Vertex: vtx(vtxOpt{
+			name:         "v0",
+			cacheKeySeed: "seed0",
+			value:        "result0",
+			inputs: []Edge{
+				{Vertex: vtx(vtxOpt{
+					name:         "v1",
+					cacheKeySeed: "seed1-net",
+					value:        "result1",
+				})},
+			},
+			selectors: map[int]digest.Digest{
+				0: dgst("sel0"),
+			},
+			slowCacheCompute: map[int]ResultBasedCacheFunc{
+				0: digestFromResult,
+			},
+		}),
+	}
+
+	res, err = j2.Build(ctx, g2)
+	require.NoError(t, err)
+	require.Equal(t, unwrap(res), "result0")
+
+	require.NoError(t, j2.Discard())
+	j2 = nil
+
+	rec, err = res.Export(ctx, testConvertToRemote)
+	require.NoError(t, err)
+
+	require.Equal(t, len(rec), 4) // adds one
+
+	// repeat with a wrapper
+	j3, err := l.NewJob("j3")
+	require.NoError(t, err)
+
+	defer func() {
+		if j3 != nil {
+			j3.Discard()
+		}
+	}()
+
+	g3 := Edge{
+		Vertex: vtx(vtxOpt{
+			name:         "v2",
+			cacheKeySeed: "seed2",
+			value:        "result2",
+			inputs:       []Edge{g2},
+		},
+		),
+	}
+
+	res, err = j3.Build(ctx, g3)
+	require.NoError(t, err)
+	require.Equal(t, unwrap(res), "result2")
+
+	require.NoError(t, j3.Discard())
+	j3 = nil
+
+	rec, err = res.Export(ctx, testConvertToRemote)
+	require.NoError(t, err)
+
+	require.Equal(t, len(rec), 5) // adds one
 }
 
 func generateSubGraph(nodes int) (Edge, int) {
@@ -2687,7 +2758,8 @@ func digestFromResult(ctx context.Context, res Result) (digest.Digest, error) {
 }
 
 func testConvertToRemote(ctx context.Context, res Result) (*Remote, error) {
-	return &Remote{Descriptors: []ocispec.Descriptor{{
-		Annotations: map[string]string{"value": fmt.Sprintf("%d", unwrapInt(res))},
-	}}}, nil
+	// return &Remote{Descriptors: []ocispec.Descriptor{{
+	// 	Annotations: map[string]string{"value": fmt.Sprintf("%d", unwrapInt(res))},
+	// }}}, nil
+	return nil, nil
 }

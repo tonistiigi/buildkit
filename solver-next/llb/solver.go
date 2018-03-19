@@ -28,13 +28,14 @@ type Solver struct {
 	solver        *solver.JobList // TODO: solver.Solver
 	resolveWorker ResolveWorkerFunc
 	frontends     map[string]frontend.Frontend
-	// ci            *cacheimport.CacheImporter
+	ci            *cacheimport.CacheImporter
 }
 
-func New(wc *worker.Controller, f map[string]frontend.Frontend, cacheStore solver.CacheKeyStorage) *Solver {
+func New(wc *worker.Controller, f map[string]frontend.Frontend, cacheStore solver.CacheKeyStorage, ci *cacheimport.CacheImporter) *Solver {
 	s := &Solver{
 		resolveWorker: defaultResolver(wc),
 		frontends:     f,
+		ci:            ci,
 	}
 
 	results := newCacheResultStorage(wc)
@@ -63,6 +64,7 @@ func (s *Solver) Bridge(b solver.Builder) frontend.FrontendLLBBridge {
 		builder:       b,
 		frontends:     s.frontends,
 		resolveWorker: s.resolveWorker,
+		ci:            s.ci,
 	}
 }
 
@@ -106,7 +108,7 @@ func (s *Solver) Solve(ctx context.Context, id string, req frontend.SolveRequest
 
 	if exp := exp.CacheExporter; exp != nil {
 		if err := j.Call(ctx, "exporting cache", func(ctx context.Context) error {
-			prepareDone := oneOffProgress(ctx, "preparing build cache")
+			prepareDone := oneOffProgress(ctx, "preparing build cache for export")
 			records, err := res.Export(ctx, workerRefConverter)
 			prepareDone(err)
 			if err != nil {

@@ -29,6 +29,7 @@ type Worker interface {
 	Exporter(name string) (exporter.Exporter, error)
 	Prune(ctx context.Context, ch chan client.UsageInfo) error
 	GetRemote(ctx context.Context, ref cache.ImmutableRef) (*solver.Remote, error)
+	FromRemote(ctx context.Context, remote *solver.Remote) (cache.ImmutableRef, error)
 }
 
 // Pre-defined label keys

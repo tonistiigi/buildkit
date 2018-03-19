@@ -89,7 +89,7 @@ func (s *state) getSessionID() string {
 	return ""
 }
 
-func (s *state) builder() Builder {
+func (s *state) builder() *subBuilder {
 	return &subBuilder{state: s}
 }
 
@@ -151,10 +151,19 @@ func (s *state) Release() {
 
 type subBuilder struct {
 	*state
+	mu        sync.Mutex
+	exporters []Exporter
 }
 
 func (sb *subBuilder) Build(ctx context.Context, e Edge) (CachedResult, error) {
-	return sb.jobList.subBuild(ctx, e, sb.vtx)
+	res, err := sb.jobList.subBuild(ctx, e, sb.vtx)
+	if err != nil {
+		return nil, err
+	}
+	sb.mu.Lock()
+	sb.exporters = append(sb.exporters, res.CacheKey().Exporter)
+	sb.mu.Unlock()
+	return res, nil
 }
 
 type Job struct {
@@ -309,6 +318,10 @@ func (jl *JobList) loadUnlocked(v, parent Vertex, j *Job, cache map[Vertex]Verte
 				return nil, errors.Errorf("inactive parent %s", parent.Digest())
 			}
 			parentState.childVtx[dgst] = struct{}{}
+
+			for id, c := range parentState.cache {
+				st.cache[id] = c
+			}
 		}
 	}
 
@@ -428,7 +441,8 @@ func (j *Job) Call(ctx context.Context, name string, fn func(ctx context.Context
 }
 
 type activeOp interface {
-	Op
+	CacheMap(context.Context) (*CacheMap, error)
+	Exec(ctx context.Context, inputs []Result) (outputs []Result, exporters []Exporter, err error)
 	IgnoreCache() bool
 	Cache() CacheManager
 	CalcSlowCache(context.Context, Index, ResultBasedCacheFunc, Result) (digest.Digest, error)
@@ -444,16 +458,22 @@ func newSharedOp(resolver ResolveOpFunc, cacheManager CacheManager, st *state) *
 	return so
 }
 
+type execRes struct {
+	execRes       []*SharedResult
+	execExporters []Exporter
+}
+
 type sharedOp struct {
 	resolver ResolveOpFunc
 	st       *state
 	g        flightcontrol.Group
 
-	opOnce sync.Once
-	op     Op
-	err    error
+	opOnce     sync.Once
+	op         Op
+	subBuilder *subBuilder
+	err        error
 
-	execRes []*SharedResult
+	execRes *execRes
 	execErr error
 
 	cacheRes *CacheMap
@@ -556,10 +576,10 @@ func (s *sharedOp) CacheMap(ctx context.Context) (*CacheMap, error) {
 	return res.(*CacheMap), nil
 }
 
-func (s *sharedOp) Exec(ctx context.Context, inputs []Result) (outputs []Result, err error) {
+func (s *sharedOp) Exec(ctx context.Context, inputs []Result) (outputs []Result, exporters []Exporter, err error) {
 	op, err := s.getOp()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	res, err := s.g.Do(ctx, "exec", func(ctx context.Context) (ret interface{}, retErr error) {
 		if s.execRes != nil || s.execErr != nil {
@@ -592,21 +612,30 @@ func (s *sharedOp) Exec(ctx context.Context, inputs []Result) (outputs []Result,
 		}
 		if complete {
 			if res != nil {
-				s.execRes = wrapShared(res)
+				var subExporters []Exporter
+				s.subBuilder.mu.Lock()
+				if len(s.subBuilder.exporters) > 0 {
+					subExporters = append(subExporters, s.subBuilder.exporters...)
+				}
+				s.subBuilder.mu.Unlock()
+
+				s.execRes = &execRes{execRes: wrapShared(res), execExporters: subExporters}
 			}
 			s.execErr = err
 		}
 		return s.execRes, err
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return unwrapShared(res.([]*SharedResult)), nil
+	r := res.(*execRes)
+	return unwrapShared(r.execRes), r.execExporters, nil
 }
 
 func (s *sharedOp) getOp() (Op, error) {
 	s.opOnce.Do(func() {
-		s.op, s.err = s.resolver(s.st.vtx, s.st.builder())
+		s.subBuilder = s.st.builder()
+		s.op, s.err = s.resolver(s.st.vtx, s.subBuilder)
 	})
 	if s.err != nil {
 		return nil, s.err
@@ -616,7 +645,7 @@ func (s *sharedOp) getOp() (Op, error) {
 
 func (s *sharedOp) release() {
 	if s.execRes != nil {
-		for _, r := range s.execRes {
+		for _, r := range s.execRes.execRes {
 			r.Release(context.TODO())
 		}
 	}

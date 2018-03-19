@@ -288,7 +288,7 @@ func TestCarryOverFromSublink(t *testing.T) {
 
 	k := NewCacheKey("", 0, []CacheKeyWithSelector{
 		{CacheKey: cacheFoo, Selector: dgst("sel0")},
-		{CacheKey: ExportableCacheKey{CacheKey: NewCacheKey(dgst("content0"), 0, nil)}, Selector: NoSelector},
+		{CacheKey: ExportableCacheKey{CacheKey: NewCacheKey(dgst("content0"), 0, nil)}},
 	})
 
 	_, err = m.Save(NewCacheKey(dgst("res"), 0, []CacheKeyWithSelector{{CacheKey: ExportableCacheKey{CacheKey: k}}}), testResult("result0"))
@@ -299,7 +299,7 @@ func TestCarryOverFromSublink(t *testing.T) {
 
 	k3 := NewCacheKey("", 0, []CacheKeyWithSelector{
 		{CacheKey: cacheBar, Selector: dgst("sel0")},
-		{CacheKey: ExportableCacheKey{CacheKey: NewCacheKey(dgst("content0"), 0, nil)}, Selector: NoSelector},
+		{CacheKey: ExportableCacheKey{CacheKey: NewCacheKey(dgst("content0"), 0, nil)}},
 	})
 
 	matches, err := m.Query(depKeys(k3), 0, dgst("res"), 0)

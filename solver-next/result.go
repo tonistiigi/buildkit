@@ -74,12 +74,15 @@ func (cr *cachedResult) CacheKey() ExportableCacheKey {
 }
 
 func (cr *cachedResult) Export(ctx context.Context, converter func(context.Context, Result) (*Remote, error)) ([]ExportRecord, error) {
-	m := make(map[digest.Digest]*ExportRecord)
-	if _, err := cr.exp.Export(ctx, m, converter); err != nil {
+	acc := ExporterAccumulator{
+		Records: map[digest.Digest]*ExportRecord{},
+		Visited: map[interface{}]struct{}{},
+	}
+	if _, err := cr.exp.Export(ctx, &acc, converter); err != nil {
 		return nil, err
 	}
-	out := make([]ExportRecord, 0, len(m))
-	for _, r := range m {
+	out := make([]ExportRecord, 0, len(acc.Records))
+	for _, r := range acc.Records {
 		out = append(out, *r)
 	}
 	return out, nil

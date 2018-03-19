@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/moby/buildkit/cache"
+	"github.com/moby/buildkit/cache/cacheimport"
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/frontend"
 	solver "github.com/moby/buildkit/solver-next"
@@ -19,11 +20,23 @@ type llbBridge struct {
 	builder       solver.Builder
 	frontends     map[string]frontend.Frontend
 	resolveWorker func() (worker.Worker, error)
+	ci            *cacheimport.CacheImporter
+	cm            solver.CacheManager
 }
 
 func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest) (res solver.CachedResult, exp map[string][]byte, err error) {
+	if req.ImportCacheRef != "" && b.cm == nil {
+		cm, err := b.ci.Resolve(ctx, req.ImportCacheRef)
+		if err != nil {
+			return nil, nil, err
+		}
+		if b.cm == nil {
+			b.cm = cm
+		}
+	}
+
 	if req.Definition != nil && req.Definition.Def != nil {
-		edge, err := Load(req.Definition) // TODO: append cache
+		edge, err := Load(req.Definition, WithCacheSource(b.cm))
 		if err != nil {
 			return nil, nil, err
 		}

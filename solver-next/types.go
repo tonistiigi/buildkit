@@ -68,6 +68,7 @@ type ExportRecord struct {
 
 // Remote is a descriptor or a list of stacked descriptors that can be pulled
 // from a content provider
+// TODO: add closer to keep referenced data from getting deleted
 type Remote struct {
 	Descriptors []ocispec.Descriptor
 	Provider    content.Provider

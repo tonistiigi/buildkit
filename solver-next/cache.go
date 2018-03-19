@@ -113,8 +113,8 @@ func (ce *cacheExporter) Export(ctx context.Context, m map[digest.Digest]*Export
 	}
 
 	cacheID := digest.FromBytes([]byte(ce.inMemoryCacheKey.id))
-	if remote != nil && len(remote.Descriptors) > 0 && remote.Descriptors[0].Digest != "" {
-		cacheID = remote.Descriptors[0].Digest
+	if remote != nil && len(remote.Descriptors) > 0 {
+		cacheID = remote.Descriptors[len(remote.Descriptors)-1].Digest
 	}
 
 	logrus.Debugf("export %s %d", cacheID, len(ce.Deps()))

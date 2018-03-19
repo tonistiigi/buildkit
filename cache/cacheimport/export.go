@@ -8,11 +8,9 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/images"
 	"github.com/docker/distribution/manifest"
 	"github.com/moby/buildkit/session"
-	"github.com/moby/buildkit/snapshot"
 	solver "github.com/moby/buildkit/solver-next"
 	"github.com/moby/buildkit/util/contentutil"
 	"github.com/moby/buildkit/util/progress"
@@ -25,9 +23,7 @@ import (
 const mediaTypeConfig = "application/vnd.buildkit.cacheconfig.v0"
 
 type ExporterOpt struct {
-	Snapshotter    snapshot.Snapshotter
 	ContentStore   content.Store
-	Differ         diff.Comparer
 	SessionManager *session.Manager
 }
 
@@ -79,8 +75,8 @@ func (ce *CacheExporter) Export(ctx context.Context, recs []solver.ExportRecord,
 					config = &configItem{Digest: desc.Digest, Links: map[solver.CacheLink]struct{}{}}
 					configs[desc.Digest] = config
 				}
-				if i+1 < len(r.Remote.Descriptors) {
-					config.Parent = r.Remote.Descriptors[i+1].Digest
+				if i > 0 {
+					config.Parent = r.Remote.Descriptors[i-1].Digest
 				}
 			}
 

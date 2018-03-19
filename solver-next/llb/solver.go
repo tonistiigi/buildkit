@@ -28,13 +28,14 @@ type Solver struct {
 	solver        *solver.JobList // TODO: solver.Solver
 	resolveWorker ResolveWorkerFunc
 	frontends     map[string]frontend.Frontend
-	// ci            *cacheimport.CacheImporter
+	ci            *cacheimport.CacheImporter
 }
 
-func New(wc *worker.Controller, f map[string]frontend.Frontend, cacheStore solver.CacheKeyStorage) *Solver {
+func New(wc *worker.Controller, f map[string]frontend.Frontend, cacheStore solver.CacheKeyStorage, ci *cacheimport.CacheImporter) *Solver {
 	s := &Solver{
 		resolveWorker: defaultResolver(wc),
 		frontends:     f,
+		ci:            ci,
 	}
 
 	results := newCacheResultStorage(wc)
@@ -63,6 +64,7 @@ func (s *Solver) Bridge(b solver.Builder) frontend.FrontendLLBBridge {
 		builder:       b,
 		frontends:     s.frontends,
 		resolveWorker: s.resolveWorker,
+		ci:            s.ci,
 	}
 }
 

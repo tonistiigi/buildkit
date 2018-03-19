@@ -2,6 +2,7 @@ package base
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/rootfs"
+	cdsnapshot "github.com/containerd/containerd/snapshots"
 	"github.com/docker/distribution/manifest/schema2"
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/cache/blobs"
@@ -36,10 +39,13 @@ import (
 	"github.com/moby/buildkit/source/git"
 	"github.com/moby/buildkit/source/http"
 	"github.com/moby/buildkit/source/local"
+	"github.com/moby/buildkit/util/contentutil"
 	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
+	ociidentity "github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"golang.org/x/sync/errgroup"
 )
 
 // TODO: this file should be removed. containerd defines ContainerdWorker, oci defines OCIWorker. There is no base worker.
@@ -187,19 +193,9 @@ func NewWorker(opt WorkerOpt) (*Worker, error) {
 	exporters[client.ExporterDocker] = dockerExporter
 
 	ce := cacheimport.NewCacheExporter(cacheimport.ExporterOpt{
-		Snapshotter:    opt.Snapshotter,
 		ContentStore:   opt.ContentStore,
 		SessionManager: opt.SessionManager,
-		Differ:         opt.Differ,
 	})
-
-	// ci := cacheimport.NewCacheImporter(cacheimport.ImportOpt{
-	// 	Snapshotter:    opt.Snapshotter,
-	// 	ContentStore:   opt.ContentStore,
-	// 	Applier:        opt.Applier,
-	// 	CacheAccessor:  cm,
-	// 	SessionManager: opt.SessionManager,
-	// })
 
 	return &Worker{
 		WorkerOpt:     opt,
@@ -209,7 +205,6 @@ func NewWorker(opt WorkerOpt) (*Worker, error) {
 		Exporters:     exporters,
 		ImageSource:   is,
 		CacheExporter: ce,
-		// CacheImporter: ci,
 	}, nil
 }
 
@@ -292,7 +287,7 @@ func (w *Worker) GetRemote(ctx context.Context, ref cache.ImmutableRef) (*solver
 		if err != nil {
 			return nil, err
 		}
-		descs[len(diffPairs)-1-i] = ocispec.Descriptor{
+		descs[i] = ocispec.Descriptor{
 			Digest:    dp.Blobsum,
 			Size:      info.Size,
 			MediaType: schema2.MediaTypeLayer,
@@ -306,6 +301,53 @@ func (w *Worker) GetRemote(ctx context.Context, ref cache.ImmutableRef) (*solver
 		Descriptors: descs,
 		Provider:    w.ContentStore,
 	}, nil
+}
+
+func (w *Worker) FromRemote(ctx context.Context, remote *solver.Remote) (cache.ImmutableRef, error) {
+	eg, gctx := errgroup.WithContext(ctx)
+	for _, desc := range remote.Descriptors {
+		func(desc ocispec.Descriptor) {
+			eg.Go(func() error {
+				return contentutil.Copy(gctx, w.ContentStore, remote.Provider, desc)
+			})
+		}(desc)
+	}
+
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+
+	chainID, err := w.unpack(ctx, remote.Descriptors)
+	if err != nil {
+		return nil, err
+	}
+
+	return w.CacheManager.Get(ctx, chainID, cache.WithDescription(fmt.Sprintf("imported %s", remote.Descriptors[len(remote.Descriptors)-1].Digest)))
+}
+
+func (w *Worker) unpack(ctx context.Context, descs []ocispec.Descriptor) (string, error) {
+	layers, err := getLayers(ctx, descs)
+	if err != nil {
+		return "", err
+	}
+
+	var chain []digest.Digest
+	for _, layer := range layers {
+		labels := map[string]string{
+			"containerd.io/uncompressed": layer.Diff.Digest.String(),
+		}
+		if _, err := rootfs.ApplyLayer(ctx, layer, chain, w.Snapshotter, w.Applier, cdsnapshot.WithLabels(labels)); err != nil {
+			return "", err
+		}
+		chain = append(chain, layer.Diff.Digest)
+
+		chainID := ociidentity.ChainID(chain)
+		if err := w.Snapshotter.SetBlob(ctx, string(chainID), layer.Diff.Digest, layer.Blob.Digest); err != nil {
+			return "", err
+		}
+	}
+
+	return string(ociidentity.ChainID(chain)), nil
 }
 
 func (w *Worker) InstructionCache() instructioncache.InstructionCache {
@@ -343,4 +385,28 @@ func ID(root string) (string, error) {
 		}
 	}
 	return string(b), nil
+}
+
+func getLayers(ctx context.Context, descs []ocispec.Descriptor) ([]rootfs.Layer, error) {
+	layers := make([]rootfs.Layer, len(descs))
+	for i, desc := range descs {
+		diffIDStr := desc.Annotations["containerd.io/uncompressed"]
+		if diffIDStr == "" {
+			return nil, errors.Errorf("%s missing uncompressed digest", desc.Digest)
+		}
+		diffID, err := digest.Parse(diffIDStr)
+		if err != nil {
+			return nil, err
+		}
+		layers[i].Diff = ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageLayer,
+			Digest:    diffID,
+		}
+		layers[i].Blob = ocispec.Descriptor{
+			MediaType: desc.MediaType,
+			Digest:    desc.Digest,
+			Size:      desc.Size,
+		}
+	}
+	return layers, nil
 }

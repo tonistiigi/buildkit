@@ -8,8 +8,8 @@ import (
 	"github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/session"
 	solver "github.com/moby/buildkit/solver-next"
-	"github.com/moby/buildkit/solver-next/llb"
 	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/worker"
 	"github.com/pkg/errors"
 )
 
@@ -68,7 +68,7 @@ func (r *ref) ReadFile(ctx context.Context, fp string) ([]byte, error) {
 }
 
 func (r *ref) getImmutableRef() (cache.ImmutableRef, error) {
-	ref, ok := r.CachedResult.Sys().(*llb.WorkerRef)
+	ref, ok := r.CachedResult.Sys().(*worker.WorkerRef)
 	if !ok {
 		return nil, errors.Errorf("invalid ref: %T", r.CachedResult.Sys())
 	}

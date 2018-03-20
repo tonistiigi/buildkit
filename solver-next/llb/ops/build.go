@@ -10,7 +10,6 @@ import (
 	"github.com/moby/buildkit/frontend"
 	"github.com/moby/buildkit/snapshot"
 	"github.com/moby/buildkit/solver-next"
-	llbsolver "github.com/moby/buildkit/solver-next/llb"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
@@ -71,7 +70,7 @@ func (b *buildOp) Exec(ctx context.Context, inputs []solver.Result) (outputs []s
 	}
 	inp := inputs[i]
 
-	ref, ok := inp.Sys().(*llbsolver.WorkerRef)
+	ref, ok := inp.Sys().(*worker.WorkerRef)
 	if !ok {
 		return nil, errors.Errorf("invalid reference for build %T", inp.Sys())
 	}

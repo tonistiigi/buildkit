@@ -90,7 +90,7 @@ func (s *Solver) Solve(ctx context.Context, id string, req frontend.SolveRequest
 	if exp := exp.Exporter; exp != nil {
 		var immutable cache.ImmutableRef
 		if res != nil {
-			workerRef, ok := res.Sys().(*WorkerRef)
+			workerRef, ok := res.Sys().(*worker.WorkerRef)
 			if !ok {
 				return errors.Errorf("invalid reference: %T", res.Sys())
 			}

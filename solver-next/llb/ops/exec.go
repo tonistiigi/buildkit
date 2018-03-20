@@ -175,7 +175,7 @@ func (e *execOp) Exec(ctx context.Context, inputs []solver.Result) ([]solver.Res
 				return nil, errors.Errorf("missing input %d", m.Input)
 			}
 			inp := inputs[int(m.Input)]
-			workerRef, ok := inp.Sys().(*llb.WorkerRef)
+			workerRef, ok := inp.Sys().(*worker.WorkerRef)
 			if !ok {
 				return nil, errors.Errorf("invalid reference for exec %T", inp.Sys())
 			}
@@ -231,9 +231,9 @@ func (e *execOp) Exec(ctx context.Context, inputs []solver.Result) ([]solver.Res
 			if err != nil {
 				return nil, errors.Wrapf(err, "error committing %s", mutable.ID())
 			}
-			refs = append(refs, llb.NewWorkerRefResult(ref, e.w))
+			refs = append(refs, worker.NewWorkerRefResult(ref, e.w))
 		} else {
-			refs = append(refs, llb.NewWorkerRefResult(out.(cache.ImmutableRef), e.w))
+			refs = append(refs, worker.NewWorkerRefResult(out.(cache.ImmutableRef), e.w))
 		}
 		outputs[i] = nil
 	}

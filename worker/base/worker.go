@@ -193,7 +193,6 @@ func NewWorker(opt WorkerOpt) (*Worker, error) {
 	exporters[client.ExporterDocker] = dockerExporter
 
 	ce := cacheimport.NewCacheExporter(cacheimport.ExporterOpt{
-		ContentStore:   opt.ContentStore,
 		SessionManager: opt.SessionManager,
 	})
 

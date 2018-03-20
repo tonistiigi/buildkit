@@ -23,6 +23,10 @@ func NewContentHashFunc(selectors []string) solver.ResultBasedCacheFunc {
 			return "", errors.Errorf("invalid reference: %T", res)
 		}
 
+		if len(selectors) == 0 {
+			selectors = []string{""}
+		}
+
 		dgsts := make([][]byte, len(selectors))
 
 		eg, ctx := errgroup.WithContext(ctx)

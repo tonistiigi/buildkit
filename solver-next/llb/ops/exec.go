@@ -143,8 +143,8 @@ func (e *execOp) getMountDeps() ([]dep, error) {
 		sel := m.Selector
 		if sel != "" {
 			sel = path.Join("/", sel)
+			deps[m.Input].Selectors = append(deps[m.Input].Selectors, sel)
 		}
-		deps[m.Input].Selectors = append(deps[m.Input].Selectors, sel)
 
 		if !m.Readonly || m.Dest == pb.RootMount { // exclude read-only rootfs
 			deps[m.Input].NoContentBasedHash = true

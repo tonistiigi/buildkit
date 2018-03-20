@@ -10,6 +10,7 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
 	"github.com/docker/distribution/manifest"
+	v1 "github.com/moby/buildkit/cache/cacheimport/v1"
 	"github.com/moby/buildkit/session"
 	solver "github.com/moby/buildkit/solver-next"
 	"github.com/moby/buildkit/util/contentutil"
@@ -20,10 +21,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-const mediaTypeConfig = "application/vnd.buildkit.cacheconfig.v0"
-
 type ExporterOpt struct {
-	ContentStore   content.Store
 	SessionManager *session.Manager
 }
 
@@ -36,10 +34,16 @@ type CacheExporter struct {
 }
 
 func (ce *CacheExporter) ExporterForTarget(target string) *RegistryCacheExporter {
-	return &RegistryCacheExporter{target: target, exporter: ce}
+	cc := v1.NewCacheChains()
+	return &RegistryCacheExporter{target: target, ExporterTarget: cc, chains: cc, exporter: ce}
 }
 
-func (ce *CacheExporter) Export(ctx context.Context, recs []solver.ExportRecord, target string) error {
+func (ce *CacheExporter) Finalize(ctx context.Context, cc *v1.CacheChains, target string) error {
+	config, descs, err := cc.Marshal()
+	if err != nil {
+		return err
+	}
+
 	// own type because oci type can't be pushed and docker type doesn't have annotations
 	type manifestList struct {
 		manifest.Versioned
@@ -48,87 +52,42 @@ func (ce *CacheExporter) Export(ctx context.Context, recs []solver.ExportRecord,
 		Manifests []ocispec.Descriptor `json:"manifests"`
 	}
 
-	configs := map[digest.Digest]*configItem{}
-
 	var mfst manifestList
 	mfst.SchemaVersion = 2
 	mfst.MediaType = images.MediaTypeDockerSchema2ManifestList
 
 	allBlobs := map[digest.Digest]struct{}{}
-
-	mp := contentutil.NewMultiProvider(ce.opt.ContentStore)
-
-	for _, r := range recs {
-
-		if r.Remote != nil && len(r.Remote.Descriptors) > 0 {
-
-			for i, desc := range r.Remote.Descriptors {
-				if _, ok := allBlobs[desc.Digest]; ok {
-					continue
-				}
-				allBlobs[desc.Digest] = struct{}{}
-				mfst.Manifests = append(mfst.Manifests, desc)
-				mp.Add(desc.Digest, r.Remote.Provider)
-
-				config, ok := configs[desc.Digest]
-				if !ok {
-					config = &configItem{Digest: desc.Digest, Links: map[solver.CacheLink]struct{}{}}
-					configs[desc.Digest] = config
-				}
-				if i > 0 {
-					config.Parent = r.Remote.Descriptors[i-1].Digest
-				}
-			}
-
-		}
-
-		config, ok := configs[r.Digest]
-		if !ok {
-			config = &configItem{Digest: r.Digest, Links: map[solver.CacheLink]struct{}{}}
-			configs[r.Digest] = config
-		}
-
-		for l := range r.Links {
-			config.Links[l] = struct{}{}
-		}
-	}
-
-	configList := make([]configItemJSON, 0, len(configs))
-
-	for _, cfg := range configs {
-		if cfg.Parent == "" && len(cfg.Links) == 0 {
+	mp := contentutil.NewMultiProvider(nil)
+	for _, l := range config.Layers {
+		if _, ok := allBlobs[l.Blob]; ok {
 			continue
 		}
-		cj := configItemJSON{
-			Digest: cfg.Digest,
-			Parent: cfg.Parent,
+		dgstPair, ok := descs[l.Blob]
+		if !ok {
+			return errors.Errorf("missing blob %s", l.Blob)
 		}
-		for l := range cfg.Links {
-			cj.Links = append(cj.Links, l)
-		}
-		configList = append(configList, cj)
+		allBlobs[l.Blob] = struct{}{}
+		mp.Add(l.Blob, dgstPair.Provider)
+
+		mfst.Manifests = append(mfst.Manifests, dgstPair.Descriptor)
 	}
 
-	dt, err := json.Marshal(configList)
+	dt, err := json.Marshal(config)
 	if err != nil {
 		return err
 	}
-
 	dgst := digest.FromBytes(dt)
 
-	addAsRoot := content.WithLabels(map[string]string{
-		"containerd.io/gc.root": time.Now().UTC().Format(time.RFC3339Nano),
-	})
-
 	configDone := oneOffProgress(ctx, fmt.Sprintf("writing config %s", dgst))
-	// TODO: use inMemoryProvider
-	if err := content.WriteBlob(ctx, ce.opt.ContentStore, dgst.String(), bytes.NewReader(dt), int64(len(dt)), dgst, addAsRoot); err != nil {
+	buf := contentutil.NewBuffer()
+	if err := content.WriteBlob(ctx, buf, dgst.String(), bytes.NewReader(dt), int64(len(dt)), dgst); err != nil {
 		return configDone(errors.Wrap(err, "error writing config blob"))
 	}
 	configDone(nil)
 
+	mp.Add(dgst, buf)
 	mfst.Manifests = append(mfst.Manifests, ocispec.Descriptor{
-		MediaType: mediaTypeConfig,
+		MediaType: v1.CacheConfigMediaTypeV0,
 		Size:      int64(len(dt)),
 		Digest:    dgst,
 	})
@@ -137,37 +96,28 @@ func (ce *CacheExporter) Export(ctx context.Context, recs []solver.ExportRecord,
 	if err != nil {
 		return errors.Wrap(err, "failed to marshal manifest")
 	}
-
 	dgst = digest.FromBytes(dt)
 
+	buf = contentutil.NewBuffer()
 	mfstDone := oneOffProgress(ctx, fmt.Sprintf("writing manifest %s", dgst))
-	if err := content.WriteBlob(ctx, ce.opt.ContentStore, dgst.String(), bytes.NewReader(dt), int64(len(dt)), dgst, addAsRoot); err != nil {
+	if err := content.WriteBlob(ctx, buf, dgst.String(), bytes.NewReader(dt), int64(len(dt)), dgst); err != nil {
 		return mfstDone(errors.Wrap(err, "error writing manifest blob"))
 	}
 	mfstDone(nil)
+	mp.Add(dgst, buf)
 
-	return push.Push(ctx, ce.opt.SessionManager, ce.opt.ContentStore, dgst, target, false)
-}
-
-type configItem struct {
-	Digest digest.Digest
-	Parent digest.Digest
-	Links  map[solver.CacheLink]struct{}
-}
-
-type configItemJSON struct {
-	Digest digest.Digest
-	Parent digest.Digest `json:",omitempty"`
-	Links  []solver.CacheLink
+	return push.Push(ctx, ce.opt.SessionManager, mp, dgst, target, false)
 }
 
 type RegistryCacheExporter struct {
-	exporter *CacheExporter
+	solver.ExporterTarget
+	chains   *v1.CacheChains
 	target   string
+	exporter *CacheExporter
 }
 
-func (ce *RegistryCacheExporter) Export(ctx context.Context, recs []solver.ExportRecord) error {
-	return ce.exporter.Export(ctx, recs, ce.target)
+func (ce *RegistryCacheExporter) Finalize(ctx context.Context) error {
+	return ce.exporter.Finalize(ctx, ce.chains, ce.target)
 }
 
 func oneOffProgress(ctx context.Context, id string) func(err error) error {

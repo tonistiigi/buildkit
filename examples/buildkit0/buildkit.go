@@ -22,7 +22,7 @@ func main() {
 	flag.Parse()
 
 	bk := buildkit(opt)
-	out := bk.Run(llb.Shlex("ls -l /bin")) // debug output
+	out := bk.Run(llb.Shlex("ls -l /bin/")) // debug output
 
 	dt, err := out.Marshal()
 	if err != nil {

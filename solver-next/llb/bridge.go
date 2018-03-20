@@ -25,18 +25,17 @@ type llbBridge struct {
 }
 
 func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest) (res solver.CachedResult, exp map[string][]byte, err error) {
+	var cm solver.CacheManager
 	if req.ImportCacheRef != "" && b.cm == nil {
-		cm, err := b.ci.Resolve(ctx, req.ImportCacheRef)
+		var err error
+		cm, err = b.ci.Resolve(ctx, req.ImportCacheRef)
 		if err != nil {
 			return nil, nil, err
-		}
-		if b.cm == nil {
-			b.cm = cm
 		}
 	}
 
 	if req.Definition != nil && req.Definition.Def != nil {
-		edge, err := Load(req.Definition, WithCacheSource(b.cm))
+		edge, err := Load(req.Definition, WithCacheSource(cm))
 		if err != nil {
 			return nil, nil, err
 		}

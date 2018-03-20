@@ -141,12 +141,15 @@ func (s *Scheduler) dispatch(e *edge) {
 	}
 
 	// if keys changed there might be possiblity for merge with other edge
-	if e.keysDidChange && e.cacheMap != nil {
-		origEdge := e.index.LoadOrStore(e, e.cacheMap.Digest, e.edge.Index, e.depKeys())
-		if origEdge != nil {
-			logrus.Debugf("merging edge %s to %s\n", e.edge.Vertex.Name(), origEdge.edge.Vertex.Name())
-			if s.mergeTo(origEdge, e) {
-				s.ef.SetEdge(e.edge, origEdge)
+	if e.keysDidChange {
+		if k := e.currentIndexKey(); k != nil {
+			// skip this if not at least 1 key per dep
+			origEdge := e.index.LoadOrStore(k, e)
+			if origEdge != nil {
+				logrus.Debugf("merging edge %s to %s\n", e.edge.Vertex.Name(), origEdge.edge.Vertex.Name())
+				if s.mergeTo(origEdge, e) {
+					s.ef.SetEdge(e.edge, origEdge)
+				}
 			}
 		}
 		e.keysDidChange = false

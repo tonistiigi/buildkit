@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/moby/buildkit/solver-next"
-	"github.com/moby/buildkit/solver-next/llb"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/source"
 	"github.com/moby/buildkit/worker"
@@ -73,5 +72,5 @@ func (s *sourceOp) Exec(ctx context.Context, _ []solver.Result) (outputs []solve
 	if err != nil {
 		return nil, err
 	}
-	return []solver.Result{llb.NewWorkerRefResult(ref, s.w)}, nil
+	return []solver.Result{worker.NewWorkerRefResult(ref, s.w)}, nil
 }

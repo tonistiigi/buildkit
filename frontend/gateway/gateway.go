@@ -19,8 +19,8 @@ import (
 	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/session"
 	solver "github.com/moby/buildkit/solver-next"
-	llbsolver "github.com/moby/buildkit/solver-next/llb"
 	"github.com/moby/buildkit/util/tracing"
+	"github.com/moby/buildkit/worker"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -77,7 +77,7 @@ func (gf *gatewayFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 		}
 		defer ref.Release(context.TODO())
 
-		workerRef, ok := ref.Sys().(*llbsolver.WorkerRef)
+		workerRef, ok := ref.Sys().(*worker.WorkerRef)
 		if !ok {
 			return nil, nil, errors.Errorf("invalid ref: %T", ref.Sys())
 		}
@@ -122,7 +122,7 @@ func (gf *gatewayFrontend) Solve(ctx context.Context, llbBridge frontend.Fronten
 			return nil, nil, err
 		}
 		defer ref.Release(context.TODO())
-		workerRef, ok := ref.Sys().(*llbsolver.WorkerRef)
+		workerRef, ok := ref.Sys().(*worker.WorkerRef)
 		if !ok {
 			return nil, nil, errors.Errorf("invalid ref: %T", ref.Sys())
 		}
@@ -308,7 +308,7 @@ func (lbf *llbBridgeForwarder) ReadFile(ctx netcontext.Context, req *pb.ReadFile
 	if ref == nil {
 		return nil, errors.Wrapf(os.ErrNotExist, "%s no found", req.FilePath)
 	}
-	workerRef, ok := ref.Sys().(*llbsolver.WorkerRef)
+	workerRef, ok := ref.Sys().(*worker.WorkerRef)
 	if !ok {
 		return nil, errors.Errorf("invalid ref: %T", ref.Sys())
 	}

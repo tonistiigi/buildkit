@@ -16,34 +16,9 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func NewWorkerRefResult(ref cache.ImmutableRef, worker worker.Worker) solver.Result {
-	return &workerRefResult{&WorkerRef{ImmutableRef: ref, Worker: worker}}
-}
-
-type WorkerRef struct {
-	ImmutableRef cache.ImmutableRef
-	Worker       worker.Worker
-}
-
-func (wr *WorkerRef) ID() string {
-	return wr.Worker.ID() + "::" + wr.ImmutableRef.ID()
-}
-
-type workerRefResult struct {
-	*WorkerRef
-}
-
-func (r *workerRefResult) Release(ctx context.Context) error {
-	return r.ImmutableRef.Release(ctx)
-}
-
-func (r *workerRefResult) Sys() interface{} {
-	return r.WorkerRef
-}
-
 func NewContentHashFunc(selectors []string) solver.ResultBasedCacheFunc {
 	return func(ctx context.Context, res solver.Result) (digest.Digest, error) {
-		ref, ok := res.Sys().(*WorkerRef)
+		ref, ok := res.Sys().(*worker.WorkerRef)
 		if !ok {
 			return "", errors.Errorf("invalid reference: %T", res)
 		}
@@ -85,7 +60,7 @@ type cacheResultStorage struct {
 }
 
 func (s *cacheResultStorage) Save(res solver.Result) (solver.CacheResult, error) {
-	ref, ok := res.Sys().(*WorkerRef)
+	ref, ok := res.Sys().(*worker.WorkerRef)
 	if !ok {
 		return solver.CacheResult{}, errors.Errorf("invalid result: %T", res.Sys())
 	}
@@ -114,7 +89,7 @@ func (s *cacheResultStorage) load(id string) (solver.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewWorkerRefResult(ref, w), nil
+	return worker.NewWorkerRefResult(ref, w), nil
 }
 
 func (s *cacheResultStorage) LoadRemote(ctx context.Context, res solver.CacheResult) (*solver.Remote, error) {
@@ -138,7 +113,7 @@ func parseWorkerRef(id string) (string, string, error) {
 }
 
 func workerRefConverter(ctx context.Context, res solver.Result) (*solver.Remote, error) {
-	ref, ok := res.Sys().(*WorkerRef)
+	ref, ok := res.Sys().(*worker.WorkerRef)
 	if !ok {
 		return nil, errors.Errorf("invalid result: %T", res.Sys())
 	}

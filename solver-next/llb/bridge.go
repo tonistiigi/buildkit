@@ -48,7 +48,7 @@ func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest) (res s
 	}
 
 	if res != nil {
-		wr, ok := res.Sys().(*WorkerRef)
+		wr, ok := res.Sys().(*worker.WorkerRef)
 		if !ok {
 			return nil, nil, errors.Errorf("invalid reference for exporting: %T", res.Sys())
 		}

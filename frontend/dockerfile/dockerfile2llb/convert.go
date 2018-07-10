@@ -68,6 +68,11 @@ func Dockerfile2LLB(ctx context.Context, dt []byte, opt ConvertOpt) (*llb.State,
 		opt.TargetPlatform = &opt.BuildPlatforms[0]
 	}
 
+	optMetaArgs := getPlatformArgs(opt.BuildPlatforms[0], *opt.TargetPlatform)
+	for i, arg := range optMetaArgs {
+		optMetaArgs[i] = setKVValue(arg, opt.BuildArgs)
+	}
+
 	dockerfile, err := parser.Parse(bytes.NewReader(dt))
 	if err != nil {
 		return nil, nil, err
@@ -80,7 +85,6 @@ func Dockerfile2LLB(ctx context.Context, dt []byte, opt ConvertOpt) (*llb.State,
 		return nil, nil, err
 	}
 
-	optMetaArgs := []instructions.KeyValuePairOptional{}
 	for _, metaArg := range metaArgs {
 		optMetaArgs = append(optMetaArgs, setKVValue(metaArg.KeyValuePairOptional, opt.BuildArgs))
 	}
@@ -1027,4 +1031,23 @@ func autoDetectPlatform(img Image, target specs.Platform, supported []specs.Plat
 		}
 	}
 	return target
+}
+
+func getPlatformArgs(bp, tp specs.Platform) []instructions.KeyValuePairOptional {
+	m := map[string]string{
+		"BUILDPLATFORM":  platforms.Format(bp),
+		"BUILDOS":        bp.OS,
+		"BUILDARCH":      bp.Architecture,
+		"BUILDVARIANT":   bp.Variant,
+		"TARGETPLATFORM": platforms.Format(tp),
+		"TARGETOS":       tp.OS,
+		"TARGETARCH":     tp.Architecture,
+		"TARGETVARIANT":  tp.Variant,
+	}
+	opts := make([]instructions.KeyValuePairOptional, 0, len(m))
+	for k, v := range m {
+		s := v
+		opts = append(opts, instructions.KeyValuePairOptional{Key: k, Value: &s})
+	}
+	return opts
 }

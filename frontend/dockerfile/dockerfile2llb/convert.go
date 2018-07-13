@@ -227,6 +227,7 @@ func Dockerfile2LLB(ctx context.Context, dt []byte, opt ConvertOpt) (*llb.State,
 					} else {
 						d.state = llb.Image(d.stage.BaseName, dfCmd(d.stage.SourceCode), llb.Platform(*platform))
 					}
+					d.platform = platform
 					return nil
 				})
 			}(i, d)
@@ -246,6 +247,7 @@ func Dockerfile2LLB(ctx context.Context, dt []byte, opt ConvertOpt) (*llb.State,
 		}
 		if d.base != nil {
 			d.state = d.base.state
+			d.platform = d.base.platform
 			d.image = clone(d.base.image)
 		}
 
@@ -654,6 +656,10 @@ func dispatchCopy(d *dispatchState, c instructions.SourcesAndDest, sourceState l
 	}
 	run := img.Run(append(runOpt, mounts...)...)
 	d.state = run.AddMount("/dest", d.state).Platform(opt.targetPlatform)
+
+	if d.platform != nil {
+		d.state = d.state.Platform(*d.platform)
+	}
 
 	return commitToHistory(&d.image, commitMessage.String(), true, &d.state)
 }

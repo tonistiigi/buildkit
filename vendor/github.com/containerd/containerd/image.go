@@ -38,7 +38,7 @@ type Image interface {
 	// Target descriptor for the image content
 	Target() ocispec.Descriptor
 	// Unpack unpacks the image's content into a snapshot
-	Unpack(context.Context, string) error
+	Unpack(context.Context, string, string) error
 	// RootFS returns the unpacked diffids that make up images rootfs.
 	RootFS(ctx context.Context) ([]digest.Digest, error)
 	// Size returns the total size of the image's packed resources.
@@ -110,14 +110,18 @@ func (i *image) IsUnpacked(ctx context.Context, snapshotterName string) (bool, e
 	return false, nil
 }
 
-func (i *image) Unpack(ctx context.Context, snapshotterName string) error {
+func (i *image) Unpack(ctx context.Context, snapshotterName, platform string) error {
 	ctx, done, err := i.client.WithLease(ctx)
 	if err != nil {
 		return err
 	}
 	defer done(ctx)
 
-	layers, err := i.getLayers(ctx, platforms.Default())
+	if platform == "" {
+		platform = platforms.Default()
+	}
+
+	layers, err := i.getLayers(ctx, platform)
 	if err != nil {
 		return err
 	}
@@ -154,7 +158,7 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string) error {
 	}
 
 	if unpacked {
-		desc, err := i.i.Config(ctx, cs, platforms.Default())
+		desc, err := i.i.Config(ctx, cs, platform)
 		if err != nil {
 			return err
 		}

@@ -351,8 +351,10 @@ func (c *Client) Pull(ctx context.Context, ref string, opts ...RemoteOpt) (Image
 	}
 
 	if pullCtx.Unpack {
-		if err := img.Unpack(ctx, pullCtx.Snapshotter); err != nil {
-			return nil, errors.Wrapf(err, "failed to unpack image on snapshotter %s", pullCtx.Snapshotter)
+		for _, platform := range pullCtx.Platforms {
+			if err := img.Unpack(ctx, pullCtx.Snapshotter, platform); err != nil {
+				return nil, errors.Wrapf(err, "failed to unpack image on snapshotter %s", pullCtx.Snapshotter)
+			}
 		}
 	}
 

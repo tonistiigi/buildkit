@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/diff"
@@ -17,6 +18,7 @@ import (
 	"github.com/moby/buildkit/util/flightcontrol"
 	"github.com/moby/buildkit/util/imageutil"
 	"github.com/moby/buildkit/util/pull"
+	"github.com/moby/buildkit/util/winlayers"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
@@ -159,6 +161,14 @@ func (p *puller) CacheKey(ctx context.Context, index int) (string, bool, error) 
 }
 
 func (p *puller) Snapshot(ctx context.Context) (cache.ImmutableRef, error) {
+	layerTypeWindows := false
+	if platform := p.Puller.Platform; platform != nil {
+		if platform.OS == "windows" && runtime.GOOS != "windows" {
+			ctx = winlayers.UseWindowsLayerMode(ctx)
+			layerTypeWindows = true
+		}
+	}
+
 	pulled, err := p.Puller.Pull(ctx)
 	if err != nil {
 		return nil, err
@@ -166,7 +176,28 @@ func (p *puller) Snapshot(ctx context.Context) (cache.ImmutableRef, error) {
 	if pulled.ChainID == "" {
 		return nil, nil
 	}
-	return p.CacheAccessor.GetFromSnapshotter(ctx, string(pulled.ChainID), cache.WithDescription(fmt.Sprintf("pulled from %s", pulled.Ref)))
+	ref, err := p.CacheAccessor.GetFromSnapshotter(ctx, string(pulled.ChainID), cache.WithDescription(fmt.Sprintf("pulled from %s", pulled.Ref)))
+	if err != nil {
+		return nil, err
+	}
+
+	if layerTypeWindows && ref != nil {
+		if err := markRefLayerTypeWindows(ref); err != nil {
+			ref.Release(context.TODO())
+			return nil, err
+		}
+	}
+	return ref, nil
+}
+
+func markRefLayerTypeWindows(ref cache.ImmutableRef) error {
+	if parent := ref.Parent(); parent != nil {
+		defer parent.Release(context.TODO())
+		if err := markRefLayerTypeWindows(parent); err != nil {
+			return err
+		}
+	}
+	return cache.SetLayerType(ref, "windows")
 }
 
 // cacheKeyFromConfig returns a stable digest from image config. If image config

@@ -12,6 +12,7 @@ import (
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/util/progress"
+	"github.com/moby/buildkit/util/resolver"
 	"github.com/moby/buildkit/worker"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -32,6 +33,7 @@ type Solver struct {
 	frontends            map[string]frontend.Frontend
 	resolveCacheImporter remotecache.ResolveCacheImporterFunc
 	platforms            []specs.Platform
+	resolverCache        resolver.Cache
 }
 
 func New(wc *worker.Controller, f map[string]frontend.Frontend, cacheStore solver.CacheKeyStorage, resolveCI remotecache.ResolveCacheImporterFunc) (*Solver, error) {
@@ -39,6 +41,7 @@ func New(wc *worker.Controller, f map[string]frontend.Frontend, cacheStore solve
 		resolveWorker:        defaultResolver(wc),
 		frontends:            f,
 		resolveCacheImporter: resolveCI,
+		resolverCache:        resolver.NewCache(),
 	}
 
 	results := newCacheResultStorage(wc)
@@ -77,6 +80,7 @@ func (s *Solver) Bridge(b solver.Builder) frontend.FrontendLLBBridge {
 		resolveCacheImporter: s.resolveCacheImporter,
 		cms:                  map[string]solver.CacheManager{},
 		platforms:            s.platforms,
+		resolverCache:        s.resolverCache,
 	}
 }
 

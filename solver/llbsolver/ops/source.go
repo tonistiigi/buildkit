@@ -60,7 +60,6 @@ func (s *sourceOp) CacheMap(ctx context.Context, index int) (*solver.CacheMap, b
 	}
 
 	return &solver.CacheMap{
-		// TODO: add os/arch
 		Digest: digest.FromBytes([]byte(sourceCacheType + ":" + k)),
 	}, done, nil
 }

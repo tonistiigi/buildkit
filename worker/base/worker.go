@@ -37,6 +37,7 @@ import (
 	"github.com/moby/buildkit/source/local"
 	"github.com/moby/buildkit/util/contentutil"
 	"github.com/moby/buildkit/util/progress"
+	"github.com/moby/buildkit/util/resolver"
 	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
 	ociidentity "github.com/opencontainers/image-spec/identity"
@@ -223,17 +224,17 @@ func (w *Worker) ResolveOp(v solver.Vertex, s frontend.FrontendLLBBridge) (solve
 	return nil, errors.Errorf("could not resolve %v", v)
 }
 
-func (w *Worker) ResolveImageConfig(ctx context.Context, ref string, platform *specs.Platform) (digest.Digest, []byte, error) {
+func (w *Worker) ResolveImageConfig(ctx context.Context, ref string, platform *specs.Platform, cache resolver.Cache) (digest.Digest, []byte, error) {
 	// ImageSource is typically source/containerimage
 	resolveImageConfig, ok := w.ImageSource.(resolveImageConfig)
 	if !ok {
 		return "", nil, errors.Errorf("worker %q does not implement ResolveImageConfig", w.ID())
 	}
-	return resolveImageConfig.ResolveImageConfig(ctx, ref, platform)
+	return resolveImageConfig.ResolveImageConfig(ctx, ref, platform, cache)
 }
 
 type resolveImageConfig interface {
-	ResolveImageConfig(ctx context.Context, ref string, platform *specs.Platform) (digest.Digest, []byte, error)
+	ResolveImageConfig(ctx context.Context, ref string, platform *specs.Platform, cache resolver.Cache) (digest.Digest, []byte, error)
 }
 
 func (w *Worker) Exec(ctx context.Context, meta executor.Meta, rootFS cache.ImmutableRef, stdin io.ReadCloser, stdout, stderr io.WriteCloser) error {

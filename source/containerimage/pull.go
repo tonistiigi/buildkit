@@ -17,6 +17,7 @@ import (
 	"github.com/moby/buildkit/util/flightcontrol"
 	"github.com/moby/buildkit/util/imageutil"
 	"github.com/moby/buildkit/util/pull"
+	"github.com/moby/buildkit/util/resolver"
 	"github.com/moby/buildkit/util/winlayers"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
@@ -53,7 +54,7 @@ func (is *imageSource) ID() string {
 	return source.DockerImageScheme
 }
 
-func (is *imageSource) ResolveImageConfig(ctx context.Context, ref string, platform *specs.Platform) (digest.Digest, []byte, error) {
+func (is *imageSource) ResolveImageConfig(ctx context.Context, ref string, platform *specs.Platform, cache resolver.Cache) (digest.Digest, []byte, error) {
 	type t struct {
 		dgst digest.Digest
 		dt   []byte
@@ -63,7 +64,11 @@ func (is *imageSource) ResolveImageConfig(ctx context.Context, ref string, platf
 		key += platforms.Format(*platform)
 	}
 	res, err := is.g.Do(ctx, key, func(ctx context.Context) (interface{}, error) {
-		dgst, dt, err := imageutil.Config(ctx, ref, pull.NewResolver(ctx, is.SessionManager, is.ImageStore), is.ContentStore, platform)
+		r := pull.NewResolver(ctx, is.SessionManager, is.ImageStore)
+		if cache != nil {
+			r = cache(r)
+		}
+		dgst, dt, err := imageutil.Config(ctx, ref, r, is.ContentStore, platform)
 		if err != nil {
 			return nil, err
 		}

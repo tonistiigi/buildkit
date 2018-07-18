@@ -10,6 +10,7 @@ import (
 	"github.com/moby/buildkit/exporter"
 	"github.com/moby/buildkit/frontend"
 	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/util/resolver"
 	digest "github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -22,7 +23,7 @@ type Worker interface {
 	LoadRef(id string) (cache.ImmutableRef, error)
 	// ResolveOp resolves Vertex.Sys() to Op implementation.
 	ResolveOp(v solver.Vertex, s frontend.FrontendLLBBridge) (solver.Op, error)
-	ResolveImageConfig(ctx context.Context, ref string, platform *specs.Platform) (digest.Digest, []byte, error)
+	ResolveImageConfig(ctx context.Context, ref string, platform *specs.Platform, cache resolver.Cache) (digest.Digest, []byte, error)
 	// Exec is similar to executor.Exec but without []mount.Mount
 	Exec(ctx context.Context, meta executor.Meta, rootFS cache.ImmutableRef, stdin io.ReadCloser, stdout, stderr io.WriteCloser) error
 	DiskUsage(ctx context.Context, opt client.DiskUsageInfo) ([]*client.UsageInfo, error)

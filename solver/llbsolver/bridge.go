@@ -12,6 +12,7 @@ import (
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/frontend"
 	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/util/resolver"
 	"github.com/moby/buildkit/util/tracing"
 	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
@@ -27,6 +28,7 @@ type llbBridge struct {
 	cms                  map[string]solver.CacheManager
 	cmsMu                sync.Mutex
 	platforms            []specs.Platform
+	resolverCache        resolver.Cache
 }
 
 func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest) (res *frontend.Result, err error) {
@@ -132,7 +134,7 @@ func (s *llbBridge) ResolveImageConfig(ctx context.Context, ref string, platform
 	if err != nil {
 		return "", nil, err
 	}
-	return w.ResolveImageConfig(ctx, ref, platform)
+	return w.ResolveImageConfig(ctx, ref, platform, s.resolverCache)
 }
 
 type lazyCacheManager struct {

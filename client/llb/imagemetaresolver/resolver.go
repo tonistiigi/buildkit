@@ -12,6 +12,7 @@ import (
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/util/contentutil"
 	"github.com/moby/buildkit/util/imageutil"
+	"github.com/moby/buildkit/util/resolver"
 	digest "github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -41,9 +42,9 @@ func New(with ...ImageMetaResolverOpt) llb.ImageMetaResolver {
 		f(&opts)
 	}
 	return &imageMetaResolver{
-		resolver: docker.NewResolver(docker.ResolverOptions{
+		resolver: resolver.NewCachingResolver(docker.NewResolver(docker.ResolverOptions{
 			Client: http.DefaultClient,
-		}),
+		})),
 		platform: opts.platform,
 		buffer:   contentutil.NewBuffer(),
 		cache:    map[string]resolveResult{},

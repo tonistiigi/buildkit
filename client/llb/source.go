@@ -143,15 +143,28 @@ type ImageOption interface {
 	SetImageOption(*ImageInfo)
 }
 
-type ImageOptionFunc func(*ImageInfo)
+type imageOptionFunc func(*ImageInfo)
 
-func (fn ImageOptionFunc) SetImageOption(ii *ImageInfo) {
+func (fn imageOptionFunc) SetImageOption(ii *ImageInfo) {
 	fn(ii)
 }
+
+var DefaultResolveMode = imageOptionFunc(func(ii *ImageInfo) {
+	ii.resolveMode = ""
+})
+
+var ForcePull = imageOptionFunc(func(ii *ImageInfo) {
+	ii.resolveMode = pb.AttrImageResolveModeForcePull
+})
+
+var PreferLocal = imageOptionFunc(func(ii *ImageInfo) {
+	ii.resolveMode = pb.AttrImageResolveModePreferLocal
+})
 
 type ImageInfo struct {
 	constraintsWrapper
 	metaResolver ImageMetaResolver
+	resolveMode  string
 }
 
 func Git(remote, ref string, opts ...GitOption) State {

@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/moby/buildkit/cache"
+	"github.com/moby/buildkit/solver/pb"
 )
 
 type Meta struct {
@@ -14,7 +15,8 @@ type Meta struct {
 	Cwd            string
 	Tty            bool
 	ReadonlyRootFS bool
-	// DisableNetworking bool
+
+	NetMode pb.NetMode
 }
 
 type Mount struct {

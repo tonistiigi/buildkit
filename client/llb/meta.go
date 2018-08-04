@@ -6,6 +6,7 @@ import (
 
 	"github.com/containerd/containerd/platforms"
 	"github.com/google/shlex"
+	"github.com/moby/buildkit/solver/pb"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -17,6 +18,7 @@ var (
 	keyEnv      = contextKeyT("llb.exec.env")
 	keyUser     = contextKeyT("llb.exec.user")
 	keyPlatform = contextKeyT("llb.platform")
+	keyNetwork  = contextKeyT("llb.network")
 )
 
 func addEnv(key, value string) StateOption {
@@ -122,6 +124,21 @@ func getPlatform(s State) *specs.Platform {
 		return &p
 	}
 	return nil
+}
+
+func network(v pb.NetMode) StateOption {
+	return func(s State) State {
+		return s.WithValue(keyNetwork, v)
+	}
+}
+
+func getNetwork(s State) pb.NetMode {
+	v := s.Value(keyNetwork)
+	if v != nil {
+		n := v.(pb.NetMode)
+		return n
+	}
+	return NetModeSandbox
 }
 
 type EnvList []KeyValue

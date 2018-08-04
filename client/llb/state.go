@@ -186,6 +186,7 @@ func (s State) Run(ro ...RunOption) ExecState {
 		Env:      getEnv(ei.State),
 		User:     getUser(ei.State),
 		ProxyEnv: ei.ProxyEnv,
+		Network:  getNetwork(ei.State),
 	}
 
 	exec := NewExecOp(s.Output(), meta, ei.ReadonlyRootFS, ei.Constraints)
@@ -245,6 +246,14 @@ func (s State) Platform(p specs.Platform) State {
 
 func (s State) GetPlatform() *specs.Platform {
 	return getPlatform(s)
+}
+
+func (s State) Network(n pb.NetMode) State {
+	return network(n)(s)
+}
+
+func (s State) GetNetwork() pb.NetMode {
+	return getNetwork(s)
 }
 
 func (s State) With(so ...StateOption) State {

@@ -213,7 +213,7 @@ func (c *Controller) Solve(ctx context.Context, req *controlapi.SolveRequest) (*
 		Exporter:        expi,
 		CacheExporter:   cacheExporter,
 		CacheExportMode: parseCacheExporterOpt(req.Cache.ExportAttrs),
-	})
+	}, req.Entitlements)
 	if err != nil {
 		return nil, err
 	}

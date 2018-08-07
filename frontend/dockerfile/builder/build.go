@@ -36,6 +36,7 @@ const (
 	keyTargetPlatform     = "platform"
 	keyMultiPlatform      = "multi-platform"
 	keyImageResolveMode   = "image-resolve-mode"
+	keyForceNetwork       = "force-network-mode"
 )
 
 var httpPrefix = regexp.MustCompile("^https?://")
@@ -60,6 +61,11 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	}
 
 	resolveMode, err := parseResolveMode(opts[keyImageResolveMode])
+	if err != nil {
+		return nil, err
+	}
+
+	defaultNetMode, err := parseNetMode(opts[keyForceNetwork])
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +256,7 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 					BuildPlatforms:   buildPlatforms,
 					ImageResolveMode: resolveMode,
 					PrefixPlatform:   exportMap,
+					ForceNetMode:     defaultNetMode,
 				})
 
 				if err != nil {
@@ -411,5 +418,21 @@ func parseResolveMode(v string) (llb.ResolveMode, error) {
 		return llb.ResolveModePreferLocal, nil
 	default:
 		return 0, errors.Errorf("invalid image-resolve-mode: %s", v)
+	}
+}
+
+func parseNetMode(v string) (pb.NetMode, error) {
+	if v == "" {
+		return llb.NetModeSandbox, nil
+	}
+	switch v {
+	case "none":
+		return llb.NetModeNone, nil
+	case "host":
+		return llb.NetModeHost, nil
+	case "sandbox":
+		return llb.NetModeSandbox, nil
+	default:
+		return 0, errors.Errorf("invalid netmode %s", v)
 	}
 }

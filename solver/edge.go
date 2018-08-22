@@ -710,7 +710,7 @@ func (e *edge) createInputRequests(desiredState edgeStatusType, f *pipeFactory) 
 		} else if dep.state == edgeStatusCacheSlow && desiredState == edgeStatusComplete {
 			// if all deps have completed cache-slow or content based cache for input is available
 			if (len(dep.keys) == 0 || e.allDepsCompletedCacheSlow || (!e.skipPhase2FastCache(dep) && e.slowCacheFunc(dep) != nil)) && (len(e.cacheRecords) == 0) {
-				if len(dep.keys) == 0 || !e.skipPhase2SlowCache(dep) && e.allDepsStateCacheSlow {
+				if len(dep.keys) == 0 || !e.skipPhase2SlowCache(dep) {
 					desiredStateDep = edgeStatusComplete
 				}
 			}

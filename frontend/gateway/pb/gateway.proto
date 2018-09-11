@@ -64,12 +64,24 @@ message SolveRequest {
 	pb.Definition Definition = 1;
 	string Frontend = 2;
 	map<string, string> FrontendOpt = 3;
+	// ImportCacheRefs is deprecated in favor or the new Imports since BuildKit v0.4.0.
+        // When ImportCacheRefs is set, the solver appends
+        // {.Type = "registry", .Attrs = {"ref": importCacheRef}}
+        // for each of the ImportCacheRefs entry to CacheImports for compatibility.
 	repeated string ImportCacheRefs = 4;
 	bool allowResultReturn = 5;
 	
 	// apicaps.CapSolveInlineReturn deprecated
 	bool Final = 10;
 	bytes ExporterAttr = 11;
+	// CacheImports was added in BuildKit v0.4.0.
+	repeated CacheOptionsEntry CacheImports = 12;
+}
+
+// CacheOptionsEntry corresponds to the control.CacheOptionsEntry
+message CacheOptionsEntry {
+	string Type = 1;
+	map<string, string> Attrs = 2;
 }
 
 message SolveResponse {

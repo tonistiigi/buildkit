@@ -259,13 +259,32 @@ func (c *grpcClient) Solve(ctx context.Context, creq client.SolveRequest) (*clie
 			}
 		}
 	}
+	var (
+		// old API
+		registryCacheImports []string
+		// new API
+		nonRegistryCacheImports []*pb.CacheOptionsEntry
+	)
+	for _, im := range creq.CacheImports {
+		if im.Type == "registry" {
+			registryCacheImports = append(registryCacheImports, im.Attrs["ref"])
+		} else {
+			nonRegistryCacheImports = append(nonRegistryCacheImports, &pb.CacheOptionsEntry{
+				Type:  im.Type,
+				Attrs: im.Attrs,
+			})
+		}
+	}
 
 	req := &pb.SolveRequest{
 		Definition:        creq.Definition,
 		Frontend:          creq.Frontend,
 		FrontendOpt:       creq.FrontendOpt,
-		ImportCacheRefs:   creq.ImportCacheRefs,
 		AllowResultReturn: true,
+		// old API
+		ImportCacheRefs: registryCacheImports,
+		// new API
+		CacheImports: nonRegistryCacheImports,
 	}
 
 	// backwards compatibility with inline return

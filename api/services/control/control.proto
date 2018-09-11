@@ -66,13 +66,40 @@ message SolveRequest {
 }
 
 message CacheOptions {
+	// ExportRef is deprecated in favor or the new Exports since BuildKit v0.4.0.
+	// When ExportRef is set, the solver appends
+	// {.Type = "registry", .Attrs = ExportAttrs.add("ref", ExportRef)}
+	// to Exports for compatibility.
 	string ExportRef = 1;
+	// ImportRefs is deprecated in favor or the new Imports since BuildKit v0.4.0.
+	// When ImportRefs is set, the solver appends
+	// {.Type = "registry", .Attrs = {"ref": importRef}}
+	// for each of the ImportRefs entry to Imports for compatibility.
 	repeated string ImportRefs = 2;
+	// ExportAttrs is deprecated since BuildKit v0.4.0.
+	// See the description of ExportRef.
 	map<string, string> ExportAttrs = 3;
+	// Exports was introduced in BuildKit v0.4.0.
+	repeated CacheOptionsEntry Exports = 4;
+	// Imports was introduced in BuildKit v0.4.0.
+	repeated CacheOptionsEntry Imports = 5;
+}
+
+message CacheOptionsEntry {
+	// Type is either "registry" or "local"
+	string Type = 1;
+	// Attrs supported by all cache exporters:
+	// * mode=(min|max)
+	// Attrs supported by "registry" cache exporter and importer:
+	// * ref=example.com:5000/foo/bar
+	// Attrs supported by "local" cache exporter and importer:
+	// * store=path/to/dir
+	map<string, string> Attrs = 2;
 }
 
 message SolveResponse {
 	map<string, string> ExporterResponse = 1;
+	map<string, string> CacheExporterResponse = 2;
 }
 
 message StatusRequest {

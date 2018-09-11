@@ -41,5 +41,6 @@ type SolveStatus struct {
 }
 
 type SolveResponse struct {
-	ExporterResponse map[string]string
+	ExporterResponse      map[string]string
+	CacheExporterResponse map[string]string
 }

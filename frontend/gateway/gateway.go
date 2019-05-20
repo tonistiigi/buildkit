@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -297,6 +298,20 @@ func NewBridgeForwarder(ctx context.Context, llbBridge frontend.FrontendLLBBridg
 	return lbf
 }
 
+func dumpStack() {
+	var (
+		buf       []byte
+		stackSize int
+	)
+	bufferLen := 16384
+	for stackSize == len(buf) {
+		buf = make([]byte, bufferLen)
+		stackSize = runtime.Stack(buf, true)
+		bufferLen *= 2
+	}
+	fmt.Printf("%s\n", buf[:stackSize])
+}
+
 func newLLBBridgeForwarder(ctx context.Context, llbBridge frontend.FrontendLLBBridge, workers frontend.WorkerInfos) (*llbBridgeForwarder, context.Context, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	lbf := NewBridgeForwarder(ctx, llbBridge, workers)
@@ -310,6 +325,7 @@ func newLLBBridgeForwarder(ctx context.Context, llbBridge frontend.FrontendLLBBr
 		case <-ctx.Done():
 		default:
 			lbf.isErrServerClosed = true
+			dumpStack()
 		}
 		cancel()
 	}()

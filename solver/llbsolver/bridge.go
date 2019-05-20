@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +37,27 @@ type llbBridge struct {
 	sm                        *session.Manager
 }
 
+func dumpStack() {
+	var (
+		buf       []byte
+		stackSize int
+	)
+	bufferLen := 16384
+	for stackSize == len(buf) {
+		buf = make([]byte, bufferLen)
+		stackSize = runtime.Stack(buf, true)
+		bufferLen *= 2
+	}
+	fmt.Printf("%s\n", buf[:stackSize])
+}
+
 func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest) (res *frontend.Result, err error) {
+    defer func() {
+        if err != nil {
+            logrus.Debugf("solve err: %+v", err)
+            dumpStack()
+        }
+    }()
 	w, err := b.resolveWorker()
 	if err != nil {
 		return nil, err

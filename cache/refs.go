@@ -315,7 +315,7 @@ func (sr *mutableRef) updateLastUsed() bool {
 	return sr.triggerLastUsed
 }
 
-func (sr *mutableRef) commit(ctx context.Context) (ImmutableRef, error) {
+func (sr *mutableRef) commit(ctx context.Context) (*immutableRef, error) {
 	if !sr.mutable || len(sr.refs) == 0 {
 		return nil, errors.Wrapf(errInvalid, "invalid mutable ref %p", sr)
 	}

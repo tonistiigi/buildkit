@@ -125,7 +125,7 @@ func (cm *cacheManager) GetFromSnapshotter(ctx context.Context, id string, opts 
 }
 
 // get requires manager lock to be taken
-func (cm *cacheManager) get(ctx context.Context, id string, fromSnapshotter bool, opts ...RefOption) (ImmutableRef, error) {
+func (cm *cacheManager) get(ctx context.Context, id string, fromSnapshotter bool, opts ...RefOption) (*immutableRef, error) {
 	rec, err := cm.getRecord(ctx, id, fromSnapshotter, opts...)
 	if err != nil {
 		return nil, err
@@ -193,7 +193,7 @@ func (cm *cacheManager) getRecord(ctx context.Context, id string, fromSnapshotte
 		return nil, errors.Wrap(errNotFound, err.Error())
 	}
 
-	var parent ImmutableRef
+	var parent *immutableRef
 	if info.Parent != "" {
 		parent, err = cm.get(ctx, info.Parent, fromSnapshotter, append(opts, NoUpdateLastUsed)...)
 		if err != nil {
@@ -201,7 +201,9 @@ func (cm *cacheManager) getRecord(ctx context.Context, id string, fromSnapshotte
 		}
 		defer func() {
 			if retErr != nil {
-				parent.Release(context.TODO())
+				parent.mu.Lock()
+				parent.release(context.TODO())
+				parent.mu.Unlock()
 			}
 		}()
 	}
@@ -224,9 +226,6 @@ func (cm *cacheManager) getRecord(ctx context.Context, id string, fromSnapshotte
 	}
 
 	if err := initializeMetadata(rec, opts...); err != nil {
-		if parent != nil {
-			parent.Release(context.TODO())
-		}
 		return nil, err
 	}
 

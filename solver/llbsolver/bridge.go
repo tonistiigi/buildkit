@@ -52,12 +52,12 @@ func dumpStack() {
 }
 
 func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest) (res *frontend.Result, err error) {
-    defer func() {
-        if err != nil {
-            logrus.Debugf("solve err: %+v", err)
-            dumpStack()
-        }
-    }()
+	defer func() {
+		if err != nil {
+			logrus.Debugf("solve err: %+v", err)
+			dumpStack()
+		}
+	}()
 	w, err := b.resolveWorker()
 	if err != nil {
 		return nil, err

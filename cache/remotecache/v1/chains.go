@@ -11,20 +11,25 @@ import (
 )
 
 func NewCacheChains() *CacheChains {
-	return &CacheChains{visited: map[interface{}]struct{}{}}
+	return &CacheChains{visited: map[interface{}]struct{}{}, itemsMap: map[digest.Digest]*item{}}
 }
 
 type CacheChains struct {
-	items   []*item
-	visited map[interface{}]struct{}
+	items    []*item
+	visited  map[interface{}]struct{}
+	itemsMap map[digest.Digest]*item
 }
 
 func (c *CacheChains) Add(dgst digest.Digest) solver.CacheExporterRecord {
+	if r, ok := c.itemsMap[dgst]; ok {
+		return r
+	}
 	if strings.HasPrefix(dgst.String(), "random:") {
 		return &nopRecord{}
 	}
 	it := &item{c: c, dgst: dgst}
 	c.items = append(c.items, it)
+	c.itemsMap[dgst] = it
 	return it
 }
 

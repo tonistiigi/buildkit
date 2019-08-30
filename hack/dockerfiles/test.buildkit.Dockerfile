@@ -19,7 +19,7 @@ RUN apk add --no-cache git
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:golang@sha256:6f7d999551dd471b58f70716754290495690efa8421e0a1fcf18eb11d0c0a537 AS xgo
 
 # gobuild is base stage for compiling go/cgo
-FROM --platform=$BUILDPLATFORM golang:1.12-buster AS gobuild-minimal
+FROM --platform=$BUILDPLATFORM golang:1.13rc2-buster AS gobuild-minimal
 COPY --from=xgo / /
 RUN apt-get update && apt-get install --no-install-recommends -y libseccomp-dev file
 
@@ -68,7 +68,7 @@ RUN --mount=from=runc-src,src=/usr/src/runc,target=. --mount=target=/root/.cache
 
 FROM gobuild-base AS buildkit-base
 WORKDIR /src
-ENV GOFLAGS=-mod=vendor
+#ENV GOFLAGS=-mod=vendor
 
 # scan the version/revision info
 FROM buildkit-base AS buildkit-version

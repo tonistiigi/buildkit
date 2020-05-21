@@ -246,7 +246,7 @@ func (cs *cacheResultStorage) LoadWithParents(ctx context.Context, res solver.Ca
 	return m, nil
 }
 
-func (cs *cacheResultStorage) Load(ctx context.Context, res solver.CacheResult) (solver.Result, error) {
+func (cs *cacheResultStorage) Load(ctx context.Context, res solver.CacheResult, helpers map[string]interface{}) (solver.Result, error) {
 	item := cs.byResultID(res.ID)
 	if item == nil || item.result == nil {
 		return nil, errors.WithStack(solver.ErrNotFound)

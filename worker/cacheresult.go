@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"log"
 	"strings"
 	"time"
 
@@ -35,8 +36,8 @@ func (s *cacheResultStorage) Save(res solver.Result, createdAt time.Time) (solve
 	}
 	return solver.CacheResult{ID: ref.ID(), CreatedAt: createdAt}, nil
 }
-func (s *cacheResultStorage) Load(ctx context.Context, res solver.CacheResult) (solver.Result, error) {
-	return s.load(res.ID, false)
+func (s *cacheResultStorage) Load(ctx context.Context, res solver.CacheResult, helpers map[string]interface{}) (solver.Result, error) {
+	return s.load(res.ID, false, helpers)
 }
 
 func (s *cacheResultStorage) getWorkerRef(id string) (Worker, string, error) {
@@ -51,7 +52,7 @@ func (s *cacheResultStorage) getWorkerRef(id string) (Worker, string, error) {
 	return w, refID, nil
 }
 
-func (s *cacheResultStorage) load(id string, hidden bool) (solver.Result, error) {
+func (s *cacheResultStorage) load(id string, hidden bool, helpers map[string]interface{}) (solver.Result, error) {
 	w, refID, err := s.getWorkerRef(id)
 	if err != nil {
 		return nil, err
@@ -60,6 +61,7 @@ func (s *cacheResultStorage) load(id string, hidden bool) (solver.Result, error)
 		return NewWorkerRefResult(nil, w), nil
 	}
 	ref, err := w.LoadRef(refID, hidden)
+	log.Printf("loading %+v %+v", err, helpers)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +85,7 @@ func (s *cacheResultStorage) LoadRemote(ctx context.Context, res solver.CacheRes
 	return remote, nil
 }
 func (s *cacheResultStorage) Exists(id string) bool {
-	ref, err := s.load(id, true)
+	ref, err := s.load(id, true, nil)
 	if err != nil {
 		return false
 	}

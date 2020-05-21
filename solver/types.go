@@ -171,6 +171,8 @@ type CacheMap struct {
 		// the checksum of file contents from input snapshots.
 		ComputeDigestFunc ResultBasedCacheFunc
 	}
+
+	LoadHelpers map[string]interface{}
 }
 
 // ExportableCacheKey is a cache key connected with an exporter that can export
@@ -207,7 +209,7 @@ type CacheManager interface {
 	Records(ck *CacheKey) ([]*CacheRecord, error)
 
 	// Load loads a cache record into a result reference.
-	Load(ctx context.Context, rec *CacheRecord) (Result, error)
+	Load(ctx context.Context, rec *CacheRecord, opts map[string]interface{}) (Result, error)
 
 	// Save saves a result based on a cache key
 	Save(key *CacheKey, s Result, createdAt time.Time) (*ExportableCacheKey, error)

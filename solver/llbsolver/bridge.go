@@ -280,11 +280,11 @@ func (lcm *lazyCacheManager) Records(ck *solver.CacheKey) ([]*solver.CacheRecord
 	}
 	return lcm.main.Records(ck)
 }
-func (lcm *lazyCacheManager) Load(ctx context.Context, rec *solver.CacheRecord) (solver.Result, error) {
+func (lcm *lazyCacheManager) Load(ctx context.Context, rec *solver.CacheRecord, helpers map[string]interface{}) (solver.Result, error) {
 	if err := lcm.wait(); err != nil {
 		return nil, err
 	}
-	return lcm.main.Load(ctx, rec)
+	return lcm.main.Load(ctx, rec, helpers)
 }
 func (lcm *lazyCacheManager) Save(key *solver.CacheKey, s solver.Result, createdAt time.Time) (*solver.ExportableCacheKey, error) {
 	if err := lcm.wait(); err != nil {

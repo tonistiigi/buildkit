@@ -132,7 +132,7 @@ func (c *cacheManager) Records(ck *CacheKey) ([]*CacheRecord, error) {
 	return outs, nil
 }
 
-func (c *cacheManager) Load(ctx context.Context, rec *CacheRecord) (Result, error) {
+func (c *cacheManager) Load(ctx context.Context, rec *CacheRecord, opts map[string]interface{}) (Result, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -141,7 +141,7 @@ func (c *cacheManager) Load(ctx context.Context, rec *CacheRecord) (Result, erro
 		return nil, err
 	}
 
-	return c.results.Load(ctx, res)
+	return c.results.Load(ctx, res, opts)
 }
 
 type LoadedResult struct {
@@ -187,12 +187,12 @@ func (c *cacheManager) filterResults(m map[string]Result, ck *CacheKey, visited 
 	return
 }
 
-func (c *cacheManager) LoadWithParents(ctx context.Context, rec *CacheRecord) ([]LoadedResult, error) {
+func (c *cacheManager) LoadWithParents(ctx context.Context, rec *CacheRecord, opts map[string]interface{}) ([]LoadedResult, error) {
 	lwp, ok := c.results.(interface {
 		LoadWithParents(context.Context, CacheResult) (map[string]Result, error)
 	})
 	if !ok {
-		res, err := c.Load(ctx, rec)
+		res, err := c.Load(ctx, rec, opts)
 		if err != nil {
 			return nil, err
 		}

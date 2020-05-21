@@ -67,8 +67,8 @@ func (cm *combinedCacheManager) Query(inp []CacheKeyWithSelector, inputIndex Ind
 	return out, nil
 }
 
-func (cm *combinedCacheManager) Load(ctx context.Context, rec *CacheRecord) (res Result, err error) {
-	results, err := rec.cacheManager.LoadWithParents(ctx, rec)
+func (cm *combinedCacheManager) Load(ctx context.Context, rec *CacheRecord, opts map[string]interface{}) (res Result, err error) {
+	results, err := rec.cacheManager.LoadWithParents(ctx, rec, opts)
 	if err != nil {
 		return nil, err
 	}

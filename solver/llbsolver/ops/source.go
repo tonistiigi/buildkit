@@ -76,6 +76,9 @@ func (s *sourceOp) CacheMap(ctx context.Context, index int) (*solver.CacheMap, b
 	return &solver.CacheMap{
 		// TODO: add os/arch
 		Digest: dgst,
+		LoadHelpers: map[string]interface{}{
+			"content-provider:sha256:abcdef": []string{"test"},
+		},
 	}, done, nil
 }
 

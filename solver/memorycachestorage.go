@@ -289,7 +289,7 @@ func (s *inMemoryResultStore) Save(r Result, createdAt time.Time) (CacheResult, 
 	return CacheResult{ID: r.ID(), CreatedAt: createdAt}, nil
 }
 
-func (s *inMemoryResultStore) Load(ctx context.Context, res CacheResult) (Result, error) {
+func (s *inMemoryResultStore) Load(ctx context.Context, res CacheResult, opts map[string]interface{}) (Result, error) {
 	v, ok := s.m.Load(res.ID)
 	if !ok {
 		return nil, errors.WithStack(ErrNotFound)

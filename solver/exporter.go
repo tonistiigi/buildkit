@@ -106,7 +106,7 @@ func (e *exporter) ExportTo(ctx context.Context, t CacheExporterTarget, opt Cach
 		}
 
 		if remote == nil && opt.Mode != CacheExportModeRemoteOnly {
-			res, err := cm.results.Load(ctx, res)
+			res, err := cm.results.Load(ctx, res, nil)
 			if err != nil {
 				return nil, err
 			}

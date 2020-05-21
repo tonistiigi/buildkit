@@ -45,7 +45,7 @@ type CacheInfoLink struct {
 // actual solve result
 type CacheResultStorage interface {
 	Save(Result, time.Time) (CacheResult, error)
-	Load(ctx context.Context, res CacheResult) (Result, error)
+	Load(ctx context.Context, res CacheResult, opts map[string]interface{}) (Result, error)
 	LoadRemote(ctx context.Context, res CacheResult) (*Remote, error)
 	Exists(id string) bool
 }

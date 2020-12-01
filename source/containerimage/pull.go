@@ -10,18 +10,19 @@ import (
 
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/diff"
+	containerderrdefs "github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	ctdlabels "github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/containerd/snapshots"
-	"github.com/docker/docker/errdefs"
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/snapshot"
 	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/solver/errdefs"
 	"github.com/moby/buildkit/source"
 	"github.com/moby/buildkit/util/flightcontrol"
 	"github.com/moby/buildkit/util/imageutil"
@@ -177,7 +178,7 @@ func (p *puller) CacheKey(ctx context.Context, g session.Group, index int) (cach
 			return nil, p.cacheKeyErr
 		}
 		defer func() {
-			if !errors.Is(err, context.Canceled) {
+			if !errdefs.IsCanceled(err) {
 				p.cacheKeyErr = err
 			}
 		}()
@@ -186,10 +187,9 @@ func (p *puller) CacheKey(ctx context.Context, g session.Group, index int) (cach
 			return nil, err
 		}
 		p.releaseTmpLeases = done
-		imageutil.AddLease(p.releaseTmpLeases)
 		defer func() {
 			if err != nil {
-				p.releaseTmpLeases(ctx)
+				imageutil.AddLease(done)
 			}
 		}()
 
@@ -283,7 +283,11 @@ func (p *puller) Snapshot(ctx context.Context, g session.Group) (ir cache.Immuta
 	if len(p.manifest.Descriptors) == 0 {
 		return nil, nil
 	}
-	defer p.releaseTmpLeases(ctx)
+	defer func() {
+		if p.releaseTmpLeases != nil {
+			imageutil.AddLease(p.releaseTmpLeases)
+		}
+	}()
 
 	var current cache.ImmutableRef
 	defer func() {
@@ -306,7 +310,7 @@ func (p *puller) Snapshot(ctx context.Context, g session.Group) (ir cache.Immuta
 	}
 
 	for _, desc := range p.manifest.Nonlayers {
-		if _, err := p.ContentStore.Info(ctx, desc.Digest); errdefs.IsNotFound(err) {
+		if _, err := p.ContentStore.Info(ctx, desc.Digest); containerderrdefs.IsNotFound(err) {
 			// manifest or config must have gotten gc'd after CacheKey, re-pull them
 			ctx, done, err := leaseutil.WithLease(ctx, p.LeaseManager, leaseutil.MakeTemporary)
 			if err != nil {

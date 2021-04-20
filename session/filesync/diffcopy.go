@@ -87,6 +87,7 @@ func recvDiffCopy(ds grpc.ClientStream, dest string, cu CacheUpdater, progress p
 		ContentHasher: ch,
 		ProgressCb:    progress,
 		Filter:        fsutil.FilterFunc(filter),
+		Differ:        fsutil.DiffMetadata,
 	}))
 }
 
@@ -105,6 +106,7 @@ func syncTargetDiffCopy(ds grpc.ServerStream, dest string) error {
 				return true
 			}
 		}(),
+		Differ: fsutil.DiffNone,
 	}))
 }
 

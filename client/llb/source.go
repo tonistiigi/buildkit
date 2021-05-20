@@ -32,8 +32,14 @@ func NewSource(id string, attrs map[string]string, c Constraints) *SourceOp {
 		attrs:       attrs,
 		constraints: c,
 	}
-	s.output = &output{vertex: s, platform: c.Platform}
+	s.output = &output{vertex: s, platform: c.Platform, getVertex: s.getVertex}
 	return s
+}
+
+func (s *SourceOp) getVertex(c *Constraints) Vertex {
+	if c == nil {
+		return s
+	}
 }
 
 func (s *SourceOp) Validate(ctx context.Context) error {

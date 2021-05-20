@@ -19,7 +19,7 @@ type StateOption func(State) State
 
 type Output interface {
 	ToInput(context.Context, *Constraints) (*pb.Input, error)
-	Vertex(context.Context) Vertex
+	Vertex(context.Context, *Constraints) Vertex
 }
 
 type Vertex interface {
@@ -111,22 +111,22 @@ func (s State) Marshal(ctx context.Context, co ...ConstraintsOpt) (*Definition, 
 	def := &Definition{
 		Metadata: make(map[digest.Digest]pb.OpMetadata, 0),
 	}
-	if s.Output() == nil || s.Output().Vertex(ctx) == nil {
-		return def, nil
-	}
-
 	defaultPlatform := platforms.Normalize(platforms.DefaultSpec())
 	c := &Constraints{
 		Platform:      &defaultPlatform,
 		LocalUniqueID: identity.NewID(),
 	}
+	if s.Output() == nil || s.Output().Vertex(ctx, c) == nil {
+		return def, nil
+	}
+
 	for _, o := range append(s.opts, co...) {
 		o.SetConstraintsOption(c)
 	}
 
 	smc := newSourceMapCollector()
 
-	def, err := marshal(ctx, s.Output().Vertex(ctx), def, smc, map[digest.Digest]struct{}{}, map[Vertex]struct{}{}, c)
+	def, err := marshal(ctx, s.Output().Vertex(ctx, c), def, smc, map[digest.Digest]struct{}{}, map[Vertex]struct{}{}, c)
 	if err != nil {
 		return def, err
 	}
@@ -176,7 +176,7 @@ func marshal(ctx context.Context, v Vertex, def *Definition, s *sourceMapCollect
 	}
 	for _, inp := range v.Inputs() {
 		var err error
-		def, err = marshal(ctx, inp.Vertex(ctx), def, s, cache, vertexCache, c)
+		def, err = marshal(ctx, inp.Vertex(ctx, c), def, s, cache, vertexCache, c)
 		if err != nil {
 			return def, err
 		}
@@ -200,7 +200,7 @@ func marshal(ctx context.Context, v Vertex, def *Definition, s *sourceMapCollect
 }
 
 func (s State) Validate(ctx context.Context) error {
-	return s.Output().Vertex(ctx).Validate(ctx)
+	return s.Output().Vertex(ctx, nil).Validate(ctx)
 }
 
 func (s State) Output() Output {
@@ -365,10 +365,11 @@ func (s State) AddExtraHost(host string, ip net.IP) State {
 func (s State) isFileOpCopyInput() {}
 
 type output struct {
-	vertex   Vertex
-	getIndex func() (pb.OutputIndex, error)
-	err      error
-	platform *specs.Platform
+	vertex    Vertex
+	getVertex func(*Constraints) Vertex
+	getIndex  func() (pb.OutputIndex, error)
+	err       error
+	platform  *specs.Platform
 }
 
 func (o *output) ToInput(ctx context.Context, c *Constraints) (*pb.Input, error) {
@@ -383,14 +384,18 @@ func (o *output) ToInput(ctx context.Context, c *Constraints) (*pb.Input, error)
 			return nil, err
 		}
 	}
-	dgst, _, _, _, err := o.vertex.Marshal(ctx, c)
+	dgst, _, _, _, err := o.Vertex(ctx, c).Marshal(ctx, c)
 	if err != nil {
 		return nil, err
 	}
 	return &pb.Input{Digest: dgst, Index: index}, nil
 }
 
-func (o *output) Vertex(context.Context) Vertex {
+func (o *output) Vertex(ctx context.Context, c *Constraints) Vertex {
+	if o.getVertex != nil {
+		o.vertex = o.getVertex(c)
+		o.getVertex = nil
+	}
 	return o.vertex
 }
 

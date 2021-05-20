@@ -38,7 +38,7 @@ func (b *build) ToInput(ctx context.Context, c *llb.Constraints) (*pb.Input, err
 	return &pb.Input{Digest: dgst, Index: pb.OutputIndex(0)}, nil
 }
 
-func (b *build) Vertex(context.Context) llb.Vertex {
+func (b *build) Vertex(context.Context, *llb.Constraints) llb.Vertex {
 	return b
 }
 

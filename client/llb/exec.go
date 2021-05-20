@@ -115,7 +115,7 @@ func (e *ExecOp) Validate(ctx context.Context) error {
 	}
 	for _, m := range e.mounts {
 		if m.source != nil {
-			if err := m.source.Vertex(ctx).Validate(ctx); err != nil {
+			if err := m.source.Vertex(ctx, nil).Validate(ctx); err != nil {
 				return err
 			}
 		}

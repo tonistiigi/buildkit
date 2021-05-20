@@ -105,7 +105,7 @@ func (d *DefinitionOp) ToInput(ctx context.Context, c *Constraints) (*pb.Input, 
 	return d.Output().ToInput(ctx, c)
 }
 
-func (d *DefinitionOp) Vertex(context.Context) Vertex {
+func (d *DefinitionOp) Vertex(context.Context, *Constraints) Vertex {
 	return d
 }
 

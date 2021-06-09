@@ -3,6 +3,7 @@ package detect
 import (
 	"context"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -15,17 +16,26 @@ import (
 
 type ExporterDetector func() (sdktrace.SpanExporter, error)
 
-var detectors map[string]ExporterDetector
+type detector struct {
+	f        ExporterDetector
+	priority int
+}
+
+var detectors map[string]detector
 var once sync.Once
 var tracer trace.Tracer
+var exporter sdktrace.SpanExporter
 var closers []func(context.Context) error
 var err error
 
-func Register(name string, exp ExporterDetector) {
+func Register(name string, exp ExporterDetector, priority int) {
 	if detectors == nil {
-		detectors = map[string]ExporterDetector{}
+		detectors = map[string]detector{}
 	}
-	detectors[name] = exp
+	detectors[name] = detector{
+		f:        exp,
+		priority: priority,
+	}
 }
 
 func detectExporter() (sdktrace.SpanExporter, error) {
@@ -37,10 +47,17 @@ func detectExporter() (sdktrace.SpanExporter, error) {
 			}
 			return nil, errors.Errorf("unsupported opentelemetry tracer %v", n)
 		}
-		return d()
+		return d.f()
 	}
+	arr := make([]detector, 0, len(detectors))
 	for _, d := range detectors {
-		exp, err := d()
+		arr = append(arr, d)
+	}
+	sort.Slice(arr, func(i, j int) bool {
+		return arr[i].priority < arr[j].priority
+	})
+	for _, d := range arr {
+		exp, err := d.f()
 		if err != nil {
 			return nil, err
 		}
@@ -74,10 +91,8 @@ func detect() error {
 	sdktp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sp), sdktrace.WithResource(res))
 	closers = append(closers, sdktp.Shutdown)
 	tp = sdktp
-	tracer = &tracerWithExporter{
-		Tracer: tp.Tracer(""),
-		exp:    exp,
-	}
+	tracer = tp.Tracer("")
+	exporter = exp
 
 	return nil
 }
@@ -93,6 +108,14 @@ func Tracer() (trace.Tracer, error) {
 		return nil, err
 	}
 	return tracer, nil
+}
+
+func Exporter() (sdktrace.SpanExporter, error) {
+	_, err := Tracer()
+	if err != nil {
+		return nil, err
+	}
+	return exporter, nil
 }
 
 func Shutdown(ctx context.Context) error {
@@ -116,13 +139,4 @@ func (serviceNameDetector) Detect(ctx context.Context) (*resource.Resource, erro
 			return os.Args[0], nil
 		},
 	).Detect(ctx)
-}
-
-type tracerWithExporter struct {
-	trace.Tracer
-	exp sdktrace.SpanExporter
-}
-
-func (t *tracerWithExporter) SpanExporter() sdktrace.SpanExporter {
-	return t.exp
 }

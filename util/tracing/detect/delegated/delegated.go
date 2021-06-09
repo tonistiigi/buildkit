@@ -6,7 +6,6 @@ import (
 
 	"github.com/moby/buildkit/util/tracing/detect"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
 )
 
 const maxBuffer = 128
@@ -16,23 +15,7 @@ var exp = &Exporter{}
 func init() {
 	detect.Register("delegated", func() (sdktrace.SpanExporter, error) {
 		return exp, nil
-	})
-}
-
-func ExporterFromContext(ctx context.Context) *Exporter {
-	s := trace.SpanFromContext(ctx)
-	if s == nil {
-		return nil
-	}
-	t := s.Tracer()
-	if te, ok := t.(interface {
-		SpanExporter() sdktrace.SpanExporter
-	}); ok {
-		if exp, ok := te.SpanExporter().(*Exporter); ok {
-			return exp
-		}
-	}
-	return nil
+	}, 100)
 }
 
 type Exporter struct {
@@ -77,7 +60,9 @@ func (e *Exporter) SetDelegate(ctx context.Context, del sdktrace.SpanExporter) e
 	e.delegate = del
 
 	if len(e.buffer) > 0 {
-		return e.delegate.ExportSpans(ctx, e.buffer)
+		err := e.delegate.ExportSpans(ctx, e.buffer)
+		e.buffer = nil
+		return err
 	}
 	return nil
 }

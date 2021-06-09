@@ -639,6 +639,12 @@ func newController(c *cli.Context, cfg *config.Config, md *toml.MetaData) (*cont
 		"registry": registryremotecache.ResolveCacheImporterFunc(sessionManager, w.ContentStore(), resolverFn),
 		"local":    localremotecache.ResolveCacheImporterFunc(sessionManager),
 	}
+
+	tc, err := detect.Exporter()
+	if err != nil {
+		return nil, err
+	}
+
 	return control.NewController(control.Opt{
 		SessionManager:            sessionManager,
 		WorkerController:          wc,
@@ -647,6 +653,7 @@ func newController(c *cli.Context, cfg *config.Config, md *toml.MetaData) (*cont
 		ResolveCacheImporterFuncs: remoteCacheImporterFuncs,
 		CacheKeyStorage:           cacheStorage,
 		Entitlements:              cfg.Entitlements,
+		TraceCollector:            tc,
 	})
 }
 

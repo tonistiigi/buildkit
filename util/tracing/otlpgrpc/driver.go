@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -91,7 +92,7 @@ func (d *driver) ExportTraces(ctx context.Context, ss []*tracesdk.SpanSnapshot) 
 	}
 	ctx, cancel := d.tracesDriver.connection.contextWithStop(ctx)
 	defer cancel()
-	ctx, tCancel := context.WithTimeout(ctx, 30)
+	ctx, tCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer tCancel()
 
 	protoSpans := transform.SpanData(ss)

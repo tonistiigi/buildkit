@@ -74,7 +74,10 @@ func detect() error {
 	sdktp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sp), sdktrace.WithResource(res))
 	closers = append(closers, sdktp.Shutdown)
 	tp = sdktp
-	tracer = tp.Tracer("")
+	tracer = &tracerWithExporter{
+		Tracer: tp.Tracer(""),
+		exp:    exp,
+	}
 
 	return nil
 }
@@ -113,4 +116,13 @@ func (serviceNameDetector) Detect(ctx context.Context) (*resource.Resource, erro
 			return os.Args[0], nil
 		},
 	).Detect(ctx)
+}
+
+type tracerWithExporter struct {
+	trace.Tracer
+	exp sdktrace.SpanExporter
+}
+
+func (t *tracerWithExporter) SpanExporter() sdktrace.SpanExporter {
+	return t.exp
 }

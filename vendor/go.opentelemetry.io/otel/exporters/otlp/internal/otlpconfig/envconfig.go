@@ -74,6 +74,9 @@ func (e *EnvOptionsReader) GetOptionsFromEnv() []GenericOption {
 		opts = append(opts, WithEndpoint(v))
 	}
 	if v, ok := e.getEnvValue("TRACES_ENDPOINT"); ok {
+		if strings.HasPrefix(strings.ToLower(v), "unix://") {
+			opts = append(opts, WithInsecure())
+		}
 		opts = append(opts, WithTracesEndpoint(v))
 	}
 	if v, ok := e.getEnvValue("METRICS_ENDPOINT"); ok {

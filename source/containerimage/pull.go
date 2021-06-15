@@ -35,6 +35,8 @@ import (
 	"github.com/opencontainers/image-spec/identity"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // TODO: break apart containerd specifics like contentstore so the resolver
@@ -69,7 +71,24 @@ func (is *Source) ID() string {
 	return source.DockerImageScheme
 }
 
-func (is *Source) ResolveImageConfig(ctx context.Context, ref string, opt llb.ResolveImageConfigOpt, sm *session.Manager, g session.Group) (digest.Digest, []byte, error) {
+func (is *Source) ResolveImageConfig(ctx context.Context, ref string, opt llb.ResolveImageConfigOpt, sm *session.Manager, g session.Group) (_ digest.Digest, _ []byte, err error) {
+	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+		p := platforms.DefaultSpec()
+		if opt.Platform != nil {
+			p = *opt.Platform
+		}
+		ctx, span = span.Tracer().Start(ctx, fmt.Sprintf("resolve config %s", ref), trace.WithAttributes(
+			attribute.String("resolvemode", opt.ResolveMode),
+			attribute.String("platform", platforms.Format(p)),
+		))
+		defer func() {
+			if err != nil {
+				span.RecordError(err)
+			}
+			span.End()
+		}()
+	}
+
 	type t struct {
 		dgst digest.Digest
 		dt   []byte
@@ -203,6 +222,9 @@ func (p *puller) CacheKey(ctx context.Context, g session.Group, index int) (cach
 			pw, _, _ := progress.FromContext(ctx)
 			progressController := &controller.Controller{
 				Writer: pw,
+			}
+			if sctx := trace.SpanContextFromContext(ctx); sctx.IsValid() {
+				progressController.SpanContext = sctx
 			}
 			if p.vtx != nil {
 				progressController.Digest = p.vtx.Digest()

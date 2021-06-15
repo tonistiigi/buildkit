@@ -8,15 +8,17 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/util/progress"
 	"github.com/opencontainers/go-digest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Controller struct {
 	count   int64
 	started *time.Time
 
-	Digest digest.Digest
-	Name   string
-	Writer progress.Writer
+	Digest      digest.Digest
+	Name        string
+	Writer      progress.Writer
+	SpanContext trace.SpanContext
 }
 
 var _ progress.Controller = &Controller{}

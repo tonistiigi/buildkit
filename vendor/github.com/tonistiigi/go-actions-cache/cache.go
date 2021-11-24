@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -438,9 +439,11 @@ func (c *Cache) doWithRetries(ctx context.Context, req *http.Request) (*http.Res
 		}
 		var resp *http.Response
 		resp, err = c.opt.Client.Do(req)
+		log.Printf("> request %v %v %v, err: %v", req.Method, req.URL.String(), req.Header.Get("Content-Range"),  err)
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
+		log.Printf("< response %v %+v", resp.Status, resp.Header)
 		if err := checkResponse(resp); err != nil {
 			var he HTTPError
 			if errors.As(err, &he) {

@@ -283,7 +283,7 @@ func buildAction(clicontext *cli.Context) error {
 		}
 		solveOpt.Frontend = ""
 		solveOpt.FrontendAttrs = nil
-		solveOpt.CacheImports = nil
+		// solveOpt.CacheImports = nil
 
 		resp, err := c.Build(ctx, solveOpt, "buildctl", func(ctx context.Context, c gateway.Client) (*gateway.Result, error) {
 			_, isSubRequest := sreq.FrontendOpt["requestid"]

@@ -11,7 +11,8 @@ type Attestation struct {
 	Ref  string
 	Path string
 
-	InToto InTotoAttestation
+	InToto            InTotoAttestation
+	PredicateCallback func() ([]byte, error)
 }
 
 type InTotoAttestation struct {

@@ -149,7 +149,7 @@ func TestSingleLevelActiveGraph(t *testing.T) {
 	}
 	g3.Vertex.(*vertex).setupCallCounters()
 
-	res, bi, err = j3.Build(ctx, g3)
+	res, err = j3.Build(ctx, g3)
 	require.NoError(t, err)
 	require.Equal(t, unwrap(res), "result3")
 	require.Equal(t, len(bi), 0)
@@ -192,18 +192,16 @@ func TestSingleLevelActiveGraph(t *testing.T) {
 	eg, _ := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
-		res, bi, err := j4.Build(ctx, g4)
+		res, err := j4.Build(ctx, g4)
 		require.NoError(t, err)
 		require.Equal(t, unwrap(res), "result4")
-		require.Equal(t, len(bi), 0)
 		return err
 	})
 
 	eg.Go(func() error {
-		res, bi, err := j5.Build(ctx, g4)
+		res, err := j5.Build(ctx, g4)
 		require.NoError(t, err)
 		require.Equal(t, unwrap(res), "result4")
-		require.Equal(t, len(bi), 0)
 		return err
 	})
 
@@ -3248,13 +3246,12 @@ func TestCacheLoadError(t *testing.T) {
 
 	cacheManager.forceFail = true
 
-	res, bi, err = j2.Build(ctx, g2)
+	res, err = j2.Build(ctx, g2)
 	require.NoError(t, err)
 	require.Equal(t, unwrapInt(res), 11)
 	require.Equal(t, int64(7), *g.Vertex.(*vertexSum).cacheCallCount)
 	require.Equal(t, int64(5), *g.Vertex.(*vertexSum).execCallCount)
 	require.Equal(t, int64(6), cacheManager.loadCounter)
-	require.Equal(t, len(bi), 0)
 
 	require.NoError(t, j2.Discard())
 	j2 = nil

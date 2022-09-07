@@ -20,10 +20,10 @@ import (
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/result"
-	"github.com/moby/buildkit/util/buildinfo"
 	"github.com/moby/buildkit/util/compression"
 	"github.com/moby/buildkit/util/entitlements"
 	"github.com/moby/buildkit/util/progress"
+	"github.com/moby/buildkit/util/provenance"
 	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
@@ -66,7 +66,7 @@ type Solver struct {
 
 // Processor defines a processing function to be applied after solving, but
 // before exporting
-type Processor func(ctx context.Context, result *frontend.Result, s *Solver, j *solver.Job) (*frontend.Result, error)
+type Processor func(ctx context.Context, result *Result, s *Solver, j *solver.Job) (*Result, error)
 
 func New(opt Opt) (*Solver, error) {
 	s := &Solver{
@@ -97,8 +97,8 @@ func (s *Solver) resolver() solver.ResolveOpFunc {
 	}
 }
 
-func (s *Solver) Bridge(b solver.Builder) frontend.FrontendLLBBridge {
-	return &llbBridge{
+func (s *Solver) bridge(b solver.Builder) *provenanceBridge {
+	return &provenanceBridge{llbBridge: &llbBridge{
 		builder:                   b,
 		frontends:                 s.frontends,
 		resolveWorker:             s.resolveWorker,
@@ -106,7 +106,11 @@ func (s *Solver) Bridge(b solver.Builder) frontend.FrontendLLBBridge {
 		resolveCacheImporterFuncs: s.resolveCacheImporterFuncs,
 		cms:                       map[string]solver.CacheManager{},
 		sm:                        s.sm,
-	}
+	}}
+}
+
+func (s *Solver) Bridge(b solver.Builder) frontend.FrontendLLBBridge {
+	return s.bridge(b)
 }
 
 func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req frontend.SolveRequest, exp ExporterRequest, ent []entitlements.Entitlement, post []Processor) (*client.SolveResponse, error) {
@@ -126,8 +130,9 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 	j.SessionID = sessionID
 
 	var res *frontend.Result
+	br := s.bridge(j)
 	if s.gatewayForwarder != nil && req.Definition == nil && req.Frontend == "" {
-		fwd := gateway.NewBridgeForwarder(ctx, s.Bridge(j), s.workerController, req.FrontendInputs, sessionID, s.sm)
+		fwd := gateway.NewBridgeForwarder(ctx, br, s.workerController, req.FrontendInputs, sessionID, s.sm)
 		defer fwd.Discard()
 		if err := s.gatewayForwarder.RegisterBuild(ctx, id, fwd); err != nil {
 			return nil, err
@@ -145,7 +150,7 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 			return nil, err
 		}
 	} else {
-		res, err = s.Bridge(j).Solve(ctx, req, sessionID)
+		res, err = br.Solve(ctx, req, sessionID)
 		if err != nil {
 			return nil, err
 		}
@@ -174,35 +179,41 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 		return nil, err
 	}
 
-	if r := res.Ref; r != nil {
-		dtbi, err := buildinfo.Encode(ctx, res.Metadata, exptypes.ExporterBuildInfo, r.BuildSources())
-		if err != nil {
-			return nil, err
-		}
-		if len(dtbi) > 0 {
-			res.AddMeta(exptypes.ExporterBuildInfo, dtbi)
-		}
-	}
-	for k, r := range res.Refs {
-		if r == nil {
-			continue
-		}
-		dtbi, err := buildinfo.Encode(ctx, res.Metadata, fmt.Sprintf("%s/%s", exptypes.ExporterBuildInfo, k), r.BuildSources())
-		if err != nil {
-			return nil, err
-		}
-		if len(dtbi) > 0 {
-			res.AddMeta(fmt.Sprintf("%s/%s", exptypes.ExporterBuildInfo, k), dtbi)
-		}
+	resProv, err := addProvenanceToResult(res, br)
+	if err != nil {
+		return nil, err
 	}
 
+	// if r := res.Ref; r != nil {
+	// 	dtbi, err := buildinfo.Encode(ctx, res.Metadata, exptypes.ExporterBuildInfo, r.BuildSources())
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	if len(dtbi) > 0 {
+	// 		res.AddMeta(exptypes.ExporterBuildInfo, dtbi)
+	// 	}
+	// }
+	// for k, r := range res.Refs {
+	// 	if r == nil {
+	// 		continue
+	// 	}
+	// 	dtbi, err := buildinfo.Encode(ctx, res.Metadata, fmt.Sprintf("%s/%s", exptypes.ExporterBuildInfo, k), r.BuildSources())
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	if len(dtbi) > 0 {
+	// 		res.AddMeta(fmt.Sprintf("%s/%s", exptypes.ExporterBuildInfo, k), dtbi)
+	// 	}
+	// }
+
 	for _, post := range post {
-		res2, err := post(ctx, res, s, j)
+		res2, err := post(ctx, resProv, s, j)
 		if err != nil {
 			return nil, err
 		}
-		res = res2
+		resProv = res2
 	}
+	res = resProv.Result
 
 	var exporterResponse map[string]string
 	if e := exp.Exporter; e != nil {
@@ -318,6 +329,73 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 	return &client.SolveResponse{
 		ExporterResponse: exporterResponse,
 	}, nil
+}
+
+func addProvenanceToResult(res *frontend.Result, br *provenanceBridge) (*Result, error) {
+	if res == nil {
+		return nil, nil
+	}
+	subBridge, req, ok := br.find(res)
+	if ok {
+		br = subBridge
+	}
+	out := &Result{
+		Result:     res,
+		Provenance: &provenance.Result{},
+	}
+	if res.Ref != nil {
+		cp, err := getProvenance(res.Ref, req, br)
+		if err != nil {
+			return nil, err
+		}
+		out.Provenance.Ref = cp
+	}
+	if len(res.Refs) == 0 {
+		return out, nil
+	}
+	out.Provenance.Refs = make(map[string]*provenance.Capture, len(res.Refs))
+	for k, ref := range res.Refs {
+		cp, err := getProvenance(ref, req, br)
+		if err != nil {
+			return nil, err
+		}
+		out.Provenance.Refs[k] = cp
+	}
+	return out, nil
+}
+
+func getProvenance(ref solver.ResultProxy, req *frontend.SolveRequest, br *provenanceBridge) (*provenance.Capture, error) {
+	if ref == nil {
+		return nil, nil
+	}
+	p := ref.Provenance()
+	if p == nil {
+		return nil, errors.Errorf("missing provenance for %s", ref.ID())
+	}
+	pr, ok := p.(*provenance.Capture)
+	if !ok {
+		return nil, errors.Errorf("invalid provenance type %T", p)
+	}
+
+	if req != nil {
+		pr.Frontend = req.Frontend
+		pr.Args = provenance.FilterArgs(req.FrontendOpt)
+		// TODO: should also save some output options like compression
+
+		if len(req.FrontendInputs) > 0 {
+			pr.IncompleteMaterials = true // not implemented
+		}
+	}
+
+	for _, img := range br.allImages() {
+		pr.AddImage(img)
+	}
+
+	if err := pr.OptimizeImageSources(); err != nil {
+		return nil, err
+	}
+
+	return pr, nil
 }
 
 type inlineCacheExporter interface {

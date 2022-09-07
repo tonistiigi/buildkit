@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -152,6 +153,7 @@ var allTests = integration.TestFuncs(
 	testSBOMScannerImage,
 	testProvenanceAttestation,
 	testGitProvenanceAttestation,
+	testProvenanceCapture,
 )
 
 // Tests that depend on the `security.*` entitlements
@@ -6266,8 +6268,8 @@ RUN echo "ok" > /foo
 				require.Equal(t, "123456", pred.Metadata.VCS["revision"])
 			}
 
-			require.Equal(t, 1, len(pred.Materials))
-			require.Equal(t, "pkg:docker/busybox@latest", pred.Materials[0].URI)
+			require.Equal(t, 1, len(pred.Materials), "%+v", pred.Materials)
+			require.Equal(t, "pkg:docker/busybox@latest?platform="+url.PathEscape(platforms.Format(platforms.Normalize(platforms.DefaultSpec()))), pred.Materials[0].URI)
 			require.NotEmpty(t, pred.Materials[0].Digest["sha256"])
 
 			require.NotEmpty(t, pred.Metadata.BuildInvocationID)
@@ -6405,10 +6407,11 @@ COPY myapp.Dockerfile /
 	}
 
 	require.Equal(t, 2, len(pred.Materials))
-	require.Equal(t, "pkg:docker/busybox@latest", pred.Materials[0].URI)
+	require.Equal(t, "pkg:docker/busybox@latest?platform="+url.PathEscape(platforms.Format(platforms.Normalize(platforms.DefaultSpec()))), pred.Materials[0].URI)
+
 	require.NotEmpty(t, pred.Materials[0].Digest["sha256"])
 
-	require.Equal(t, strings.Replace(server.URL+"/.git#v1", "http://", "https://", 1), pred.Materials[1].URI) // TODO: buildinfo broken
+	require.Equal(t, server.URL+"/.git#v1", pred.Materials[1].URI) // TODO: buildinfo broken
 	require.Equal(t, strings.TrimSpace(string(expectedGitSHA)), pred.Materials[1].Digest["sha1"])
 }
 

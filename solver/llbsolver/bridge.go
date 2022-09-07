@@ -1,8 +1,10 @@
 package llbsolver
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -11,7 +13,6 @@ import (
 	"github.com/moby/buildkit/cache/remotecache"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
-	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/frontend"
 	gw "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/identity"
@@ -19,11 +20,13 @@ import (
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/errdefs"
 	llberrdefs "github.com/moby/buildkit/solver/llbsolver/errdefs"
+	"github.com/moby/buildkit/solver/llbsolver/ops"
 	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/source"
 	"github.com/moby/buildkit/util/bklog"
-	"github.com/moby/buildkit/util/buildinfo"
 	"github.com/moby/buildkit/util/flightcontrol"
 	"github.com/moby/buildkit/util/progress"
+	"github.com/moby/buildkit/util/provenance"
 	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
@@ -63,20 +66,20 @@ func (b *llbBridge) Warn(ctx context.Context, dgst digest.Digest, msg string, op
 	})
 }
 
-func (b *llbBridge) loadResult(ctx context.Context, def *pb.Definition, cacheImports []gw.CacheOptionsEntry) (solver.CachedResult, solver.BuildSources, error) {
+func (b *llbBridge) loadResult(ctx context.Context, def *pb.Definition, cacheImports []gw.CacheOptionsEntry) (solver.CachedResultWithProvenance, error) {
 	w, err := b.resolveWorker()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	ent, err := loadEntitlements(b.builder)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var cms []solver.CacheManager
 	for _, im := range cacheImports {
 		cmID, err := cmKey(im)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		b.cmsMu.Lock()
 		var cm solver.CacheManager
@@ -113,7 +116,7 @@ func (b *llbBridge) loadResult(ctx context.Context, def *pb.Definition, cacheImp
 
 	edge, err := Load(def, dpc.Load, ValidateEntitlements(ent), WithCacheSources(cms), NormalizeRuntimePlatforms(), WithValidateCaps())
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to load LLB")
+		return nil, errors.Wrap(err, "failed to load LLB")
 	}
 
 	if len(dpc.ids) > 0 {
@@ -124,33 +127,122 @@ func (b *llbBridge) loadResult(ctx context.Context, def *pb.Definition, cacheImp
 		if err := b.eachWorker(func(w worker.Worker) error {
 			return w.PruneCacheMounts(ctx, ids)
 		}); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 
-	res, bi, err := b.builder.Build(ctx, edge)
+	res, err := b.builder.Build(ctx, edge)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return res, bi, nil
+	return res, nil
 }
 
-func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest, sid string) (res *frontend.Result, err error) {
+type reqRes struct {
+	req frontend.SolveRequest
+	res *frontend.Result
+}
+
+// provenanceBridge provides scoped access to LLBBridge and captures the request it makes for provenance
+type provenanceBridge struct {
+	*llbBridge
+
+	images     []provenance.ImageSource
+	builds     []reqRes
+	subBridges []*provenanceBridge
+}
+
+func equalResult(a, b *frontend.Result) bool {
+	if len(a.Metadata) != len(b.Metadata) {
+		return false
+	}
+	for k := range a.Metadata {
+		if !bytes.Equal(a.Metadata[k], b.Metadata[k]) {
+			return false
+		}
+	}
+	if a.Ref != nil && b.Ref == nil {
+		return false
+	}
+	if a.Ref == nil && b.Ref != nil {
+		return false
+	}
+	if a.Ref != nil && b.Ref != nil {
+		if a.Ref.ID() != b.Ref.ID() {
+			return false
+		}
+	}
+
+	if len(a.Refs) != len(b.Refs) {
+		return false
+	}
+	for k := range a.Refs {
+		if a.Refs[k].ID() != b.Refs[k].ID() {
+			return false
+		}
+	}
+	return true
+}
+
+func (b *provenanceBridge) allImages() []provenance.ImageSource {
+	res := make([]provenance.ImageSource, 0, len(b.images))
+	res = append(res, b.images...)
+	for _, sb := range b.subBridges {
+		res = append(res, sb.allImages()...)
+	}
+	return res
+}
+
+func (b *provenanceBridge) find(r *frontend.Result) (*provenanceBridge, *frontend.SolveRequest, bool) {
+	for _, br := range b.subBridges {
+		if b, req, ok := br.find(r); ok {
+			return b, req, true
+		}
+	}
+	for _, bld := range b.builds {
+		if equalResult(bld.res, r) {
+			return b, &bld.req, true
+		}
+	}
+	return nil, nil, false
+}
+
+func (b *provenanceBridge) ResolveImageConfig(ctx context.Context, ref string, opt llb.ResolveImageConfigOpt) (dgst digest.Digest, config []byte, err error) {
+	dgst, config, err = b.llbBridge.ResolveImageConfig(ctx, ref, opt)
+	if err != nil {
+		return "", nil, err
+	}
+
+	b.images = append(b.images, provenance.ImageSource{
+		Ref:      ref,
+		Platform: opt.Platform,
+		Digest:   dgst,
+	})
+
+	log.Printf("resolving image config for %s: %s %+v", ref, dgst, opt)
+	return dgst, config, nil
+}
+
+func (b *provenanceBridge) Solve(ctx context.Context, req frontend.SolveRequest, sid string) (res *frontend.Result, err error) {
 	if req.Definition != nil && req.Definition.Def != nil && req.Frontend != "" {
 		return nil, errors.New("cannot solve with both Definition and Frontend specified")
 	}
 
 	if req.Definition != nil && req.Definition.Def != nil {
 		res = &frontend.Result{Ref: newResultProxy(b, req)}
+		b.builds = append(b.builds, reqRes{req: req, res: res})
 	} else if req.Frontend != "" {
-		f, ok := b.frontends[req.Frontend]
+		f, ok := b.llbBridge.frontends[req.Frontend]
 		if !ok {
 			return nil, errors.Errorf("invalid frontend: %s", req.Frontend)
 		}
-		res, err = f.Solve(ctx, b, req.FrontendOpt, req.FrontendInputs, sid, b.sm)
+		wb := &provenanceBridge{llbBridge: b.llbBridge}
+		res, err = f.Solve(ctx, wb, req.FrontendOpt, req.FrontendInputs, sid, b.llbBridge.sm)
 		if err != nil {
 			return nil, err
 		}
+		b.subBridges = append(b.subBridges, wb)
+		wb.builds = append(wb.builds, reqRes{req: req, res: res})
 	} else {
 		return &frontend.Result{}, nil
 	}
@@ -161,51 +253,56 @@ func (b *llbBridge) Solve(ctx context.Context, req frontend.SolveRequest, sid st
 		})
 	}
 
-	if len(res.Refs) > 0 {
-		for p := range res.Refs {
-			dtbi, err := buildinfo.GetMetadata(res.Metadata, fmt.Sprintf("%s/%s", exptypes.ExporterBuildInfo, p), req.Frontend, req.FrontendOpt)
-			if err != nil {
-				return nil, err
-			}
-			if len(dtbi) > 0 {
-				res.AddMeta(fmt.Sprintf("%s/%s", exptypes.ExporterBuildInfo, p), dtbi)
-			}
-		}
-	} else {
-		dtbi, err := buildinfo.GetMetadata(res.Metadata, exptypes.ExporterBuildInfo, req.Frontend, req.FrontendOpt)
-		if err != nil {
-			return nil, err
-		}
-		if len(dtbi) > 0 {
-			res.AddMeta(exptypes.ExporterBuildInfo, dtbi)
-		}
-	}
+	// if len(res.Refs) > 0 {
+	// 	for p := range res.Refs {
+	// 		dtbi, err := buildinfo.GetMetadata(res.Metadata, fmt.Sprintf("%s/%s", exptypes.ExporterBuildInfo, p), req.Frontend, req.FrontendOpt)
+	// 		if err != nil {
+	// 			return nil, err
+	// 		}
+	// 		if len(dtbi) > 0 {
+	// 			res.AddMeta(fmt.Sprintf("%s/%s", exptypes.ExporterBuildInfo, p), dtbi)
+	// 		}
+	// 	}
+	// } else {
+	// 	dtbi, err := buildinfo.GetMetadata(res.Metadata, exptypes.ExporterBuildInfo, req.Frontend, req.FrontendOpt)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	if len(dtbi) > 0 {
+	// 		res.AddMeta(exptypes.ExporterBuildInfo, dtbi)
+	// 	}
+	// }
 
 	return
 }
 
 type resultProxy struct {
-	b          *llbBridge
+	id         string
+	b          *provenanceBridge
 	req        frontend.SolveRequest
 	g          flightcontrol.Group
 	mu         sync.Mutex
 	released   bool
 	v          solver.CachedResult
-	bsrc       solver.BuildSources
 	err        error
 	errResults []solver.Result
+	provenance *provenance.Capture
 }
 
-func newResultProxy(b *llbBridge, req frontend.SolveRequest) *resultProxy {
-	return &resultProxy{req: req, b: b}
+func newResultProxy(b *provenanceBridge, req frontend.SolveRequest) *resultProxy {
+	return &resultProxy{req: req, b: b, id: identity.NewID()}
+}
+
+func (rp *resultProxy) ID() string {
+	return rp.id
 }
 
 func (rp *resultProxy) Definition() *pb.Definition {
 	return rp.req.Definition
 }
 
-func (rp *resultProxy) BuildSources() solver.BuildSources {
-	return rp.bsrc
+func (rp *resultProxy) Provenance() interface{} {
+	return rp.provenance
 }
 
 func (rp *resultProxy) Release(ctx context.Context) (err error) {
@@ -251,8 +348,8 @@ func (rp *resultProxy) wrapError(err error) error {
 	return err
 }
 
-func (rp *resultProxy) loadResult(ctx context.Context) (solver.CachedResult, solver.BuildSources, error) {
-	res, bsrc, err := rp.b.loadResult(ctx, rp.req.Definition, rp.req.CacheImports)
+func (rp *resultProxy) loadResult(ctx context.Context) (solver.CachedResultWithProvenance, error) {
+	res, err := rp.b.loadResult(ctx, rp.req.Definition, rp.req.CacheImports)
 	var ee *llberrdefs.ExecError
 	if errors.As(err, &ee) {
 		ee.EachRef(func(res solver.Result) error {
@@ -262,7 +359,7 @@ func (rp *resultProxy) loadResult(ctx context.Context) (solver.CachedResult, sol
 		// acquire ownership so ExecError finalizer doesn't attempt to release as well
 		ee.OwnerBorrowed = true
 	}
-	return res, bsrc, err
+	return res, err
 }
 
 func (rp *resultProxy) Result(ctx context.Context) (res solver.CachedResult, err error) {
@@ -280,7 +377,7 @@ func (rp *resultProxy) Result(ctx context.Context) (res solver.CachedResult, err
 			return rp.v, rp.err
 		}
 		rp.mu.Unlock()
-		v, bsrc, err := rp.loadResult(ctx)
+		v, err := rp.loadResult(ctx)
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -299,8 +396,16 @@ func (rp *resultProxy) Result(ctx context.Context) (res solver.CachedResult, err
 			return nil, errors.Errorf("evaluating released result")
 		}
 		rp.v = v
-		rp.bsrc = bsrc
 		rp.err = err
+		if err == nil {
+			capture, err := captureProvenance(ctx, v)
+			if err != nil && rp.err != nil {
+				rp.err = errors.Wrapf(rp.err, "failed to capture provenance: %v", err)
+				v.Release(context.TODO())
+				rp.v = nil
+			}
+			rp.provenance = capture
+		}
 		rp.mu.Unlock()
 		return v, err
 	})
@@ -308,6 +413,116 @@ func (rp *resultProxy) Result(ctx context.Context) (res solver.CachedResult, err
 		return r.(solver.CachedResult), nil
 	}
 	return nil, err
+}
+
+func captureProvenance(ctx context.Context, res solver.CachedResultWithProvenance) (*provenance.Capture, error) {
+	if res == nil {
+		return nil, nil
+	}
+	c := &provenance.Capture{}
+
+	err := res.WalkProvenance(ctx, func(pp solver.ProvenanceProvider) error {
+		switch op := pp.(type) {
+		case *ops.SourceOp:
+			id, pin := op.Pin()
+			switch s := id.(type) {
+			case *source.ImageIdentifier:
+				dgst, err := digest.Parse(pin)
+				if err != nil {
+					return errors.Wrapf(err, "failed to parse image digest %s", pin)
+				}
+				c.AddImage(provenance.ImageSource{
+					Ref:      s.Reference.String(),
+					Platform: s.Platform,
+					Digest:   dgst,
+				})
+			case *source.LocalIdentifier:
+				c.AddLocal(provenance.LocalSource{
+					Name: s.Name,
+				})
+			case *source.GitIdentifier:
+				url := s.Remote
+				if s.Ref != "" {
+					url += "#" + s.Ref
+				}
+				c.AddGit(provenance.GitSource{
+					URL:    url,
+					Commit: pin,
+				})
+				if s.AuthTokenSecret != "" {
+					c.AddSecret(provenance.Secret{
+						ID:       s.AuthTokenSecret,
+						Optional: true,
+					})
+				}
+				if s.AuthHeaderSecret != "" {
+					c.AddSecret(provenance.Secret{
+						ID:       s.AuthHeaderSecret,
+						Optional: true,
+					})
+				}
+				if s.MountSSHSock != "" {
+					c.AddSSH(provenance.SSH{
+						ID:       s.MountSSHSock,
+						Optional: true,
+					})
+				}
+			case *source.HTTPIdentifier:
+				dgst, err := digest.Parse(pin)
+				if err != nil {
+					return errors.Wrapf(err, "failed to parse HTTP digest %s", pin)
+				}
+				c.AddHTTP(provenance.HTTPSource{
+					URL:    s.URL,
+					Digest: dgst,
+				})
+			case *source.OCIIdentifier:
+				dgst, err := digest.Parse(pin)
+				if err != nil {
+					return errors.Wrapf(err, "failed to parse OCI digest %s", pin)
+				}
+				c.AddLocalImage(provenance.ImageSource{
+					Ref:      s.Name,
+					Platform: s.Platform,
+					Digest:   dgst,
+				})
+			default:
+				return errors.Errorf("unknown source identifier %T", id)
+			}
+		case *ops.ExecOp:
+			pr := op.Proto()
+			for _, m := range pr.Mounts {
+				if m.MountType == pb.MountType_SECRET {
+					c.AddSecret(provenance.Secret{
+						ID:       m.SecretOpt.GetID(),
+						Optional: m.SecretOpt.GetOptional(),
+					})
+				}
+				if m.MountType == pb.MountType_SSH {
+					c.AddSSH(provenance.SSH{
+						ID:       m.SSHOpt.GetID(),
+						Optional: m.SSHOpt.GetOptional(),
+					})
+				}
+			}
+			for _, se := range pr.Secretenv {
+				c.AddSecret(provenance.Secret{
+					ID:       se.GetID(),
+					Optional: se.GetOptional(),
+				})
+			}
+			if pr.Network != pb.NetMode_NONE {
+				c.NetworkAccess = true
+			}
+		case *ops.BuildOp:
+			c.IncompleteMaterials = true // not supported yet
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return c, err
 }
 
 func (b *llbBridge) ResolveImageConfig(ctx context.Context, ref string, opt llb.ResolveImageConfigOpt) (dgst digest.Digest, config []byte, err error) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"path"
 	"sort"
 
@@ -27,6 +28,7 @@ func (sr *immutableRef) FileList(ctx context.Context, s session.Group) ([]string
 			if err := json.Unmarshal(dt, &files); err != nil {
 				return nil, err
 			}
+			log.Printf("loaded filelist from cache for %s", sr.ID())
 			return files, nil
 		}
 
@@ -78,6 +80,7 @@ func (sr *immutableRef) FileList(ctx context.Context, s session.Group) ([]string
 		if err := sr.SetExternal(keyFileList, dt); err != nil {
 			return nil, err
 		}
+		log.Printf("read filelist from blob for %s", sr.ID())
 		return files, nil
 	})
 	if err != nil {

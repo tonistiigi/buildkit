@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -184,6 +185,19 @@ func (ic *ImageWriter) Commit(ctx context.Context, inp *exporter.Source, session
 		idx.Manifests = append(idx.Manifests, *desc)
 
 		labels[fmt.Sprintf("containerd.io/gc.ref.content.%d", i)] = desc.Digest.String()
+
+		// demo
+		for i, r := range r.LayerChain() {
+			files, err := r.FileList(ctx, session.NewGroup(sessionID))
+			if err != nil {
+				return nil, err
+			}
+			log.Printf("> layer %d start", i)
+			for _, f := range files {
+				log.Printf("  %s", f)
+			}
+			log.Printf("< layer %d end", i)
+		}
 
 		if attestations, ok := inp.Attestations[p.ID]; ok {
 			inTotos, err := ic.extractAttestations(ctx, opts, session.NewGroup(sessionID), desc, inp.Refs, attestations)

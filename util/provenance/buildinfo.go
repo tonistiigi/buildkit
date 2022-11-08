@@ -10,18 +10,51 @@ import (
 	"github.com/package-url/packageurl-go"
 )
 
-var BuildKitBuildType = "https://mobyproject.org/buildkit@v1"
+const (
+	BuildKitBuildType = "https://mobyproject.org/buildkit@v1"
+)
 
 type ProvenancePredicate struct {
 	slsa.ProvenancePredicate
-	Metadata *ProvenanceMetadata                `json:"metadata,omitempty"`
-	Source   *Source                            `json:"buildSource,omitempty"`
-	Layers   map[string][][]ocispecs.Descriptor `json:"buildLayers,omitempty"`
+	Invocation  ProvenanceInvocation `json:"invocation,omitempty"`
+	BuildConfig *BuildConfig         `json:"buildConfig,omitempty"`
+	Metadata    *ProvenanceMetadata  `json:"metadata,omitempty"`
+}
+
+type ProvenanceInvocation struct {
+	ConfigSource slsa.ConfigSource `json:"configSource,omitempty"`
+	Parameters   Parameters        `json:"parameters,omitempty"`
+	Environment  interface{}       `json:"environment,omitempty"`
+}
+
+type Parameters struct {
+	Args    map[string]string `json:"args,omitempty"`
+	Secrets []*Secret         `json:"secrets,omitempty"`
+	SSH     []*SSH            `json:"ssh,omitempty"`
+	Locals  []*LocalSource    `json:"locals,omitempty"`
+	// TODO: select export attributes
+	// TODO: frontend inputs
+}
+
+type Environment struct {
+	Platform string `json:"platform"`
 }
 
 type ProvenanceMetadata struct {
 	slsa.ProvenanceMetadata
-	VCS map[string]string `json:"vcs,omitempty"`
+	Completeness     ProvenanceComplete `json:"completeness"`
+	BuildKitMetadata BuildKitMetadata   `json:"https://mobyproject.org/buildkit@v1#metadata,omitempty"`
+}
+
+type ProvenanceComplete struct {
+	slsa.ProvenanceComplete
+	Hermetic bool `json:"https://mobyproject.org/buildkit@v1#hermetic,omitempty"`
+}
+
+type BuildKitMetadata struct {
+	VCS    map[string]string                  `json:"vcs,omitempty"`
+	Source *Source                            `json:"source,omitempty"`
+	Layers map[string][][]ocispecs.Descriptor `json:"layers,omitempty"`
 }
 
 func slsaMaterials(srcs Sources) ([]slsa.ProvenanceMaterial, error) {
@@ -107,7 +140,7 @@ func NewPredicate(c *Capture) (*ProvenancePredicate, error) {
 	if err != nil {
 		return nil, err
 	}
-	inv := slsa.ProvenanceInvocation{}
+	inv := ProvenanceInvocation{}
 
 	contextKey := "context"
 	if v, ok := c.Args["contextkey"]; ok && v != "" {
@@ -139,7 +172,25 @@ func NewPredicate(c *Capture) (*ProvenancePredicate, error) {
 		}
 	}
 
-	inv.Parameters = c.Args
+	inv.Parameters.Args = c.Args
+
+	for _, s := range c.Secrets {
+		inv.Parameters.Secrets = append(inv.Parameters.Secrets, &Secret{
+			ID:       s.ID,
+			Optional: s.Optional,
+		})
+	}
+	for _, s := range c.SSH {
+		inv.Parameters.SSH = append(inv.Parameters.SSH, &SSH{
+			ID:       s.ID,
+			Optional: s.Optional,
+		})
+	}
+	for _, s := range c.Sources.Local {
+		inv.Parameters.Locals = append(inv.Parameters.Locals, &LocalSource{
+			Name: s.Name,
+		})
+	}
 
 	incompleteMaterials := c.IncompleteMaterials
 	if !incompleteMaterials {
@@ -149,24 +200,25 @@ func NewPredicate(c *Capture) (*ProvenancePredicate, error) {
 	}
 
 	pr := &ProvenancePredicate{
+		Invocation: inv,
 		ProvenancePredicate: slsa.ProvenancePredicate{
-			BuildType:  BuildKitBuildType,
-			Invocation: inv,
-			Materials:  materials,
+			BuildType: BuildKitBuildType,
+			Materials: materials,
 		},
 		Metadata: &ProvenanceMetadata{
-			ProvenanceMetadata: slsa.ProvenanceMetadata{
-				Completeness: slsa.ProvenanceComplete{
+			Completeness: ProvenanceComplete{
+				ProvenanceComplete: slsa.ProvenanceComplete{
 					Parameters:  true,
 					Environment: true,
 					Materials:   !incompleteMaterials,
 				},
+				Hermetic: !incompleteMaterials && !c.NetworkAccess,
 			},
 		},
 	}
 
 	if len(vcs) > 0 {
-		pr.Metadata.VCS = vcs
+		pr.Metadata.BuildKitMetadata.VCS = vcs
 	}
 
 	return pr, nil

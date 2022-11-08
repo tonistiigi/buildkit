@@ -6251,21 +6251,20 @@ RUN echo "ok" > /foo
 			case *clientFrontend, *gatewayFrontend:
 				// TODO: buildinfo broken
 			default:
-				params, ok := pred.Invocation.Parameters.(map[string]interface{})
-				require.True(t, ok, "%T", pred.Invocation.Parameters)
+				args := pred.Invocation.Parameters.Args
 				if mode == "max" {
-					require.Equal(t, 2, len(params))
+					require.Equal(t, 2, len(args))
 					require.True(t, pred.Metadata.Completeness.Parameters)
 
-					require.Equal(t, "bar", params["build-arg:FOO"])
-					require.Equal(t, "abc", params["label:lbl"])
+					require.Equal(t, "bar", args["build-arg:FOO"])
+					require.Equal(t, "abc", args["label:lbl"])
 				} else {
 					require.False(t, pred.Metadata.Completeness.Parameters)
-					require.Equal(t, 0, len(params), "%v", params)
+					require.Equal(t, 0, len(args), "%v", args)
 				}
 
-				require.Equal(t, "https://example.invalid/repo.git", pred.Metadata.VCS["source"])
-				require.Equal(t, "123456", pred.Metadata.VCS["revision"])
+				require.Equal(t, "https://example.invalid/repo.git", pred.Metadata.BuildKitMetadata.VCS["source"])
+				require.Equal(t, "123456", pred.Metadata.BuildKitMetadata.VCS["revision"])
 			}
 
 			require.Equal(t, 1, len(pred.Materials), "%+v", pred.Materials)
@@ -6285,22 +6284,16 @@ RUN echo "ok" > /foo
 			require.False(t, pred.Metadata.Reproducible)
 
 			if mode == "max" {
-				require.Equal(t, 2, len(pred.Layers))
-				require.NotNil(t, pred.Source)
-				require.Equal(t, "Dockerfile", pred.Source.Infos[0].Filename)
-				require.Equal(t, dockerfile, pred.Source.Infos[0].Data)
+				require.Equal(t, 2, len(pred.Metadata.BuildKitMetadata.Layers))
+				require.NotNil(t, pred.Metadata.BuildKitMetadata.Source)
+				require.Equal(t, "Dockerfile", pred.Metadata.BuildKitMetadata.Source.Infos[0].Filename)
+				require.Equal(t, dockerfile, pred.Metadata.BuildKitMetadata.Source.Infos[0].Data)
 				require.NotNil(t, pred.BuildConfig)
 
-				bc, ok := pred.BuildConfig.(map[string]interface{})
-				require.True(t, ok, "wrong type %T", pred.BuildConfig)
-
-				llb, ok := bc["llbDefinition"].([]interface{})
-				require.True(t, ok, "wrong buildconfig %+v", bc)
-
-				require.Equal(t, 3, len(llb))
+				require.Equal(t, 3, len(pred.BuildConfig.Definition))
 			} else {
-				require.Equal(t, 0, len(pred.Layers))
-				require.Nil(t, pred.Source)
+				require.Equal(t, 0, len(pred.Metadata.BuildKitMetadata.Layers))
+				require.Nil(t, pred.Metadata.BuildKitMetadata.Source)
 				require.Nil(t, pred.BuildConfig)
 			}
 		})

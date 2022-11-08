@@ -28,17 +28,17 @@ type HTTPSource struct {
 }
 
 type LocalSource struct {
-	Name string
+	Name string `json:"name"`
 }
 
 type Secret struct {
-	ID       string
-	Optional bool
+	ID       string `json:"id"`
+	Optional bool   `json:"optional,omitempty"`
 }
 
 type SSH struct {
-	ID       string
-	Optional bool
+	ID       string `json:"id"`
+	Optional bool   `json:"optional,omitempty"`
 }
 
 type Sources struct {

@@ -24,8 +24,6 @@ import (
 	"github.com/pkg/errors"
 )
 
-var BuildKitBuildType = "https://mobyproject.org/buildkit@v1"
-
 func ProvenanceProcessor(attrs map[string]string) llbsolver.Processor {
 	return func(ctx context.Context, res *llbsolver.Result, s *llbsolver.Solver, j *solver.Job) (*llbsolver.Result, error) {
 		if len(res.Refs) == 0 {
@@ -89,15 +87,17 @@ func ProvenanceProcessor(attrs map[string]string) llbsolver.Processor {
 			var addLayers func() error
 
 			if mode != "max" {
-				param := make(map[string]string)
-				for k, v := range pr.Invocation.Parameters.(map[string]string) {
+				args := make(map[string]string)
+				for k, v := range pr.Invocation.Parameters.Args {
 					if strings.HasPrefix(k, "build-arg:") || strings.HasPrefix(k, "label:") {
 						pr.Metadata.Completeness.Parameters = false
 						continue
 					}
-					param[k] = v
+					args[k] = v
 				}
-				pr.Invocation.Parameters = param
+				pr.Invocation.Parameters.Args = args
+				pr.Invocation.Parameters.Secrets = nil
+				pr.Invocation.Parameters.SSH = nil
 			} else {
 				dgsts, err := provenance.AddBuildConfig(ctx, pr, res.Refs[p.ID])
 				if err != nil {
@@ -131,7 +131,11 @@ func ProvenanceProcessor(attrs map[string]string) llbsolver.Processor {
 					}
 
 					if len(m) != 0 {
-						pr.Layers = m
+						if pr.Metadata == nil {
+							pr.Metadata = &provenance.ProvenanceMetadata{}
+						}
+
+						pr.Metadata.BuildKitMetadata.Layers = m
 					}
 
 					return nil

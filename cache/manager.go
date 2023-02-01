@@ -225,7 +225,7 @@ func (cm *cacheManager) GetByBlob(ctx context.Context, desc ocispecs.Descriptor,
 	blobOnly := true
 	if link != nil {
 		snapshotID = link.getSnapshotID()
-		blobOnly = link.getBlobOnly()
+		// blobOnly = link.getBlobOnly()
 		go link.Release(context.TODO())
 	}
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/platforms"
+	"github.com/docker/distribution/reference"
 	controlapi "github.com/moby/buildkit/api/services/control"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/exporter/containerimage/image"
@@ -22,10 +23,8 @@ import (
 )
 
 const (
-	buildArgPrefix      = "build-arg:"
-	labelPrefix         = "label:"
-	contextPrefix       = "context:"
-	inputMetadataPrefix = "input-metadata:"
+	buildArgPrefix = "build-arg:"
+	labelPrefix    = "label:"
 
 	keyTarget           = "target"
 	keyCgroupParent     = "cgroup-parent"
@@ -41,9 +40,13 @@ const (
 	keyCacheFrom        = "cache-from"    // for registry only. deprecated in favor of keyCacheImports
 	keyCacheImports     = "cache-imports" // JSON representation of []CacheOptionsEntry
 
-	keyCacheNSArg       = "build-arg:BUILDKIT_CACHE_MOUNT_NS"
-	keyMultiPlatformArg = "build-arg:BUILDKIT_MULTI_PLATFORM"
-	keyHostnameArg      = "build-arg:BUILDKIT_SANDBOX_HOSTNAME"
+	// Don't forget to update frontend documentation if you add
+	// a new build-arg: frontend/dockerfile/docs/reference.md
+	keyCacheNSArg           = "build-arg:BUILDKIT_CACHE_MOUNT_NS"
+	keyMultiPlatformArg     = "build-arg:BUILDKIT_MULTI_PLATFORM"
+	keyHostnameArg          = "build-arg:BUILDKIT_SANDBOX_HOSTNAME"
+	keyContextKeepGitDirArg = "build-arg:BUILDKIT_CONTEXT_KEEP_GIT_DIR"
+	keySourceDateEpoch      = "build-arg:SOURCE_DATE_EPOCH"
 )
 
 type BuildConfig struct {
@@ -79,6 +82,7 @@ type ContextOpt struct {
 	UseDockerignore bool
 	LocalOpts       []llb.LocalOption
 	Platform        *ocispecs.Platform
+	ResolveMode     string
 }
 
 func validateMinCaps(c client.Client) error {
@@ -397,13 +401,32 @@ func (bc *BuildConfig) MainContext(ctx context.Context, opts ...llb.LocalOption)
 		WithInternalName("load build context"),
 	}, opts...)
 
-	_ = bctx
+	st := llb.Local(bctx.contextLocalName, opts...)
 
-	return llb.State{}, errors.Errorf("not implemented")
+	return &st, nil
 }
 
 func (bc *BuildConfig) NamedContext(ctx context.Context, name string, opt ContextOpt) (*llb.State, *image.Image, error) {
-	return nil, nil, errors.Errorf("not implemented")
+	named, err := reference.ParseNormalizedNamed(name)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "invalid context name %s", name)
+	}
+	name = strings.TrimSuffix(reference.FamiliarString(named), ":latest")
+
+	if opt.Platform == nil {
+		pp := platforms.Normalize(platforms.DefaultSpec())
+		opt.Platform = &pp
+	}
+	pname := name + "::" + platforms.Format(platforms.Normalize(*opt.Platform))
+	st, img, err := bc.namedContext(ctx, name, pname, opt)
+	if err != nil {
+		return nil, nil, err
+	}
+	if st != nil {
+		return st, img, nil
+	}
+	opt.Platform = nil
+	return bc.namedContext(ctx, name, name, opt)
 }
 
 func (bc *BuildConfig) IsNoCache(name string) bool {

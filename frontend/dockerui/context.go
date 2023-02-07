@@ -20,6 +20,7 @@ const (
 	DefaultLocalNameDockerfile = "dockerfile"
 	DefaultDockerfileName      = "Dockerfile"
 	DefaultDockerignoreName    = ".dockerignore"
+	EmptyImageName             = "scratch"
 )
 
 const (
@@ -27,8 +28,6 @@ const (
 	keyContextSubDir  = "contextsubdir"
 	keyNameContext    = "contextkey"
 	keyNameDockerfile = "dockerfilekey"
-
-	keyContextKeepGitDirArg = "build-arg:BUILDKIT_CONTEXT_KEEP_GIT_DIR"
 )
 
 var httpPrefix = regexp.MustCompile(`^https?://`)

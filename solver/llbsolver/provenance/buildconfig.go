@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	resourcestypes "github.com/moby/buildkit/executor/resources/types"
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/pb"
 	digest "github.com/opencontainers/go-digest"
@@ -16,9 +17,10 @@ type BuildConfig struct {
 }
 
 type BuildStep struct {
-	ID     string      `json:"id,omitempty"`
-	Op     interface{} `json:"op,omitempty"`
-	Inputs []string    `json:"inputs,omitempty"`
+	ID            string                   `json:"id,omitempty"`
+	Op            interface{}              `json:"op,omitempty"`
+	Inputs        []string                 `json:"inputs,omitempty"`
+	ResourceUsage []*resourcestypes.Sample `json:"resourceUsage,omitempty"`
 }
 
 type Source struct {
@@ -41,9 +43,9 @@ func digestMap(idx map[digest.Digest]int) map[digest.Digest]string {
 	return m
 }
 
-func AddBuildConfig(ctx context.Context, p *ProvenancePredicate, rp solver.ResultProxy) (map[digest.Digest]int, error) {
+func AddBuildConfig(ctx context.Context, p *ProvenancePredicate, c *Capture, rp solver.ResultProxy, withUsage bool) (map[digest.Digest]int, error) {
 	def := rp.Definition()
-	steps, indexes, err := toBuildSteps(def)
+	steps, indexes, err := toBuildSteps(def, c, withUsage)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +60,7 @@ func AddBuildConfig(ctx context.Context, p *ProvenancePredicate, rp solver.Resul
 	if def.Source != nil {
 		sis := make([]SourceInfo, len(def.Source.Infos))
 		for i, si := range def.Source.Infos {
-			steps, indexes, err := toBuildSteps(si.Definition)
+			steps, indexes, err := toBuildSteps(si.Definition, c, withUsage)
 			if err != nil {
 				return nil, err
 			}
@@ -94,7 +96,7 @@ func AddBuildConfig(ctx context.Context, p *ProvenancePredicate, rp solver.Resul
 	return indexes, nil
 }
 
-func toBuildSteps(def *pb.Definition) ([]BuildStep, map[digest.Digest]int, error) {
+func toBuildSteps(def *pb.Definition, c *Capture, withUsage bool) ([]BuildStep, map[digest.Digest]int, error) {
 	if def == nil || len(def.Def) == 0 {
 		return nil, nil, nil
 	}
@@ -154,11 +156,16 @@ func toBuildSteps(def *pb.Definition) ([]BuildStep, map[digest.Digest]int, error
 			inputs[i] = fmt.Sprintf("step%d:%d", indexes[inp.Digest], inp.Index)
 		}
 		op.Inputs = nil
-		out = append(out, BuildStep{
+		s := BuildStep{
 			ID:     fmt.Sprintf("step%d", i),
 			Inputs: inputs,
 			Op:     op,
-		})
+		}
+		if withUsage {
+			s.ResourceUsage = c.Samples[dgst]
+		}
+		out = append(out, s)
+
 	}
 	return out, indexes, nil
 }

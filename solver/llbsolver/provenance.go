@@ -355,6 +355,13 @@ func captureProvenance(ctx context.Context, res solver.CachedResultWithProvenanc
 			if pr.Network != pb.NetMode_NONE {
 				c.NetworkAccess = true
 			}
+			samples, err := op.Samples()
+			if err != nil {
+				return err
+			}
+			if len(samples) > 0 {
+				c.AddSamples(op.Digest(), samples)
+			}
 		case *ops.BuildOp:
 			c.IncompleteMaterials = true // not supported yet
 		}
@@ -394,6 +401,12 @@ func NewProvenanceCreator(ctx context.Context, cp *provenance.Capture, res solve
 		}
 	}
 
+	withUsage := false
+	if v, ok := attrs["capture-usage"]; ok {
+		b, err := strconv.ParseBool(v)
+		withUsage = err == nil && b
+	}
+
 	pr, err := provenance.NewPredicate(cp)
 	if err != nil {
 		return nil, err
@@ -423,7 +436,7 @@ func NewProvenanceCreator(ctx context.Context, cp *provenance.Capture, res solve
 		pr.Invocation.Parameters.Secrets = nil
 		pr.Invocation.Parameters.SSH = nil
 	case "max":
-		dgsts, err := provenance.AddBuildConfig(ctx, pr, res)
+		dgsts, err := provenance.AddBuildConfig(ctx, pr, cp, res, withUsage)
 		if err != nil {
 			return nil, err
 		}

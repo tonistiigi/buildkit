@@ -165,7 +165,6 @@ func toBuildSteps(def *pb.Definition, c *Capture, withUsage bool) ([]BuildStep, 
 			s.ResourceUsage = c.Samples[dgst]
 		}
 		out = append(out, s)
-
 	}
 	return out, indexes, nil
 }

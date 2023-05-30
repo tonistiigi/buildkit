@@ -50,14 +50,11 @@ func getCgroupCPUStat(cgroupPath string) (*types.CPUStat, error) {
 
 		switch key {
 		case cpuUsageUsec:
-			cpuStat.UsageNanos = new(uint64)
-			*cpuStat.UsageNanos = value * 1000
+			cpuStat.UsageNanos = uint64Ptr(value * 1000)
 		case cpuUserUsec:
-			cpuStat.UserNanos = new(uint64)
-			*cpuStat.UserNanos = value * 1000
+			cpuStat.UserNanos = uint64Ptr(value * 1000)
 		case cpuSystemUsec:
-			cpuStat.SystemNanos = new(uint64)
-			*cpuStat.SystemNanos = value * 1000
+			cpuStat.SystemNanos = uint64Ptr(value * 1000)
 		case cpuNrPeriods:
 			cpuStat.NrPeriods = new(uint32)
 			*cpuStat.NrPeriods = uint32(value)
@@ -65,8 +62,7 @@ func getCgroupCPUStat(cgroupPath string) (*types.CPUStat, error) {
 			cpuStat.NrThrottled = new(uint32)
 			*cpuStat.NrThrottled = uint32(value)
 		case cpuThrottledUsec:
-			cpuStat.ThrottledNanos = new(uint64)
-			*cpuStat.ThrottledNanos = value * 1000
+			cpuStat.ThrottledNanos = uint64Ptr(value * 1000)
 		}
 	}
 

@@ -300,10 +300,15 @@ func (w *runcExecutor) Run(ctx context.Context, id string, root executor.Mount, 
 
 	bklog.G(ctx).Debugf("> creating %s %v", id, meta.Args)
 
+	recorderReleaseHook := func(ctx context.Context) error { return nil }
+
 	cgroupPath := spec.Linux.CgroupsPath
 	if cgroupPath != "" {
 		rec, err = w.resmon.RecordNamespace(cgroupPath, resources.RecordOpt{
 			NetworkSampler: namespace,
+			ReleaseFunc: func() error {
+				return recorderReleaseHook(context.TODO())
+			},
 		})
 		if err != nil {
 			return nil, err
@@ -341,9 +346,12 @@ func (w *runcExecutor) Run(ctx context.Context, id string, root executor.Mount, 
 
 	if rec == nil {
 		return nil, releaseContainer(context.TODO())
+	} else {
+		recorderReleaseHook = releaseContainer
+		go rec.Close()
 	}
 
-	return rec, rec.CloseAsync(releaseContainer)
+	return rec, nil
 }
 
 func exitError(ctx context.Context, err error) error {

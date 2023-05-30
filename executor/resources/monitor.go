@@ -2,7 +2,6 @@ package resources
 
 import (
 	"bufio"
-	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,21 +27,22 @@ var initOnce sync.Once
 var isCgroupV2 bool
 
 type cgroupRecord struct {
-	once         sync.Once
-	ns           string
-	sampler      *Sub[*types.Sample]
-	closeSampler func() error
-	samples      []*types.Sample
-	err          error
-	done         chan struct{}
-	monitor      *Monitor
-	netSampler   NetworkSampler
-	startCPUStat *procfs.CPUStat
-	sysCPUStat   *types.SysCPUStat
+	once             sync.Once
+	ns               string
+	sampler          *Sub[*types.Sample]
+	closeSampler     func() error
+	samples          []*types.Sample
+	err              error
+	done             chan struct{}
+	monitor          *Monitor
+	netSampler       NetworkSampler
+	startCPUStat     *procfs.CPUStat
+	sysCPUStat       *types.SysCPUStat
+	afterReleaseHook func() error
 }
 
 func (r *cgroupRecord) Wait() error {
-	go r.close()
+	go r.Close()
 	<-r.done
 	return r.err
 }
@@ -56,15 +56,7 @@ func (r *cgroupRecord) Start() {
 	r.closeSampler = s.Close
 }
 
-func (r *cgroupRecord) CloseAsync(next func(context.Context) error) error {
-	go func() {
-		r.close()
-		next(context.TODO())
-	}()
-	return nil
-}
-
-func (r *cgroupRecord) close() {
+func (r *cgroupRecord) Close() error {
 	r.once.Do(func() {
 		defer close(r.done)
 		go func() {
@@ -101,7 +93,15 @@ func (r *cgroupRecord) close() {
 				r.sysCPUStat = cpu
 			}
 		}
+
+		if r.afterReleaseHook != nil {
+			err := r.afterReleaseHook()
+			if r.err == nil {
+				r.err = err
+			}
+		}
 	})
+	return r.err
 }
 
 func (r *cgroupRecord) sample(tm time.Time) (*types.Sample, error) {
@@ -150,6 +150,7 @@ func (r *cgroupRecord) Samples() (*types.Samples, error) {
 }
 
 type nopRecord struct {
+	afterReleaseHook func() error
 }
 
 func (r *nopRecord) Wait() error {
@@ -160,8 +161,11 @@ func (r *nopRecord) Samples() (*types.Samples, error) {
 	return nil, nil
 }
 
-func (r *nopRecord) CloseAsync(next func(context.Context) error) error {
-	return next(context.TODO())
+func (r *nopRecord) Close() error {
+	if r.afterReleaseHook != nil {
+		r.afterReleaseHook()
+	}
+	return nil
 }
 
 func (r *nopRecord) Start() {
@@ -180,6 +184,7 @@ type NetworkSampler interface {
 
 type RecordOpt struct {
 	NetworkSampler NetworkSampler
+	ReleaseFunc    func() error
 }
 
 func (m *Monitor) RecordNamespace(ns string, opt RecordOpt) (types.Recorder, error) {
@@ -190,13 +195,16 @@ func (m *Monitor) RecordNamespace(ns string, opt RecordOpt) (types.Recorder, err
 	default:
 	}
 	if !isCgroupV2 || isClosed {
-		return &nopRecord{}, nil
+		return &nopRecord{
+			afterReleaseHook: opt.ReleaseFunc,
+		}, nil
 	}
 	r := &cgroupRecord{
-		ns:         ns,
-		done:       make(chan struct{}),
-		monitor:    m,
-		netSampler: opt.NetworkSampler,
+		ns:               ns,
+		done:             make(chan struct{}),
+		monitor:          m,
+		netSampler:       opt.NetworkSampler,
+		afterReleaseHook: opt.ReleaseFunc,
 	}
 	m.mu.Lock()
 	m.records[ns] = r
@@ -210,7 +218,7 @@ func (m *Monitor) Close() error {
 	defer m.mu.Unlock()
 
 	for _, r := range m.records {
-		r.close()
+		r.Close()
 	}
 	return nil
 }

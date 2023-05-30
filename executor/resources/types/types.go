@@ -1,7 +1,6 @@
 package types
 
 import (
-	"context"
 	"time"
 
 	"github.com/moby/buildkit/util/network"
@@ -9,7 +8,7 @@ import (
 
 type Recorder interface {
 	Start()
-	CloseAsync(func(context.Context) error) error
+	Close() error
 	Wait() error
 	Samples() (*Samples, error)
 }

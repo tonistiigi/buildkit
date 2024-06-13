@@ -3,6 +3,7 @@ package progress
 import (
 	"context"
 	"io"
+	"maps"
 	"sort"
 	"sync"
 	"time"
@@ -206,13 +207,9 @@ func pipe() (*progressReader, *progressWriter, func(error)) {
 }
 
 func newWriter(pw *progressWriter) *progressWriter {
-	meta := make(map[string]interface{})
-	for k, v := range pw.meta {
-		meta[k] = v
-	}
 	pw = &progressWriter{
 		reader: pw.reader,
-		meta:   meta,
+		meta:   maps.Clone(pw.meta),
 	}
 	pw.reader.append(pw)
 	return pw
@@ -239,10 +236,7 @@ func (pw *progressWriter) Write(id string, v interface{}) error {
 func (pw *progressWriter) WriteRawProgress(p *Progress) error {
 	meta := p.meta
 	if len(pw.meta) > 0 {
-		meta = map[string]interface{}{}
-		for k, v := range p.meta {
-			meta[k] = v
-		}
+		meta = maps.Clone(p.meta)
 		for k, v := range pw.meta {
 			if _, ok := meta[k]; !ok {
 				meta[k] = v

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -704,10 +705,7 @@ func toDispatchState(ctx context.Context, dt []byte, opt ConvertOpt) (*dispatchS
 		for p := range d.ctxPaths {
 			ctxPaths[p] = struct{}{}
 		}
-
-		locals := []instructions.KeyValuePairOptional{}
-		locals = append(locals, d.opt.metaArgs...)
-		locals = append(locals, d.buildArgs...)
+		locals := slices.Concat(d.opt.metaArgs, d.buildArgs)
 		for _, a := range locals {
 			switch a.Key {
 			case sbomScanStage:
@@ -1529,9 +1527,9 @@ func dispatchCopy(d *dispatchState, cfg copyConfig) error {
 
 		copyOpts := []llb.ConstraintsOpt{
 			llb.Platform(*d.platform),
+			llb.ProgressGroup(pgID, pgName, true),
 		}
 		copyOpts = append(copyOpts, fileOpt...)
-		copyOpts = append(copyOpts, llb.ProgressGroup(pgID, pgName, true))
 
 		mergeOpts := append([]llb.ConstraintsOpt{}, fileOpt...)
 		d.cmdIndex--

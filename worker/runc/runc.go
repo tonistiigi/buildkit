@@ -22,13 +22,13 @@ import (
 	"github.com/moby/buildkit/executor/resources"
 	"github.com/moby/buildkit/executor/runcexecutor"
 	containerdsnapshot "github.com/moby/buildkit/snapshot/containerd"
+	"github.com/moby/buildkit/util/db/boltutil"
 	"github.com/moby/buildkit/util/leaseutil"
 	"github.com/moby/buildkit/util/network/netproviders"
 	"github.com/moby/buildkit/util/winlayers"
 	"github.com/moby/buildkit/worker/base"
 	wlabel "github.com/moby/buildkit/worker/label"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
-	bolt "go.etcd.io/bbolt"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -93,7 +93,7 @@ func NewWorkerOpt(root string, snFactory SnapshotterFactory, rootless bool, proc
 		return opt, err
 	}
 
-	db, err := bolt.Open(filepath.Join(root, "containerdmeta.db"), 0644, nil)
+	db, err := boltutil.Open(filepath.Join(root, "containerdmeta.db"), 0644, nil)
 	if err != nil {
 		return opt, err
 	}

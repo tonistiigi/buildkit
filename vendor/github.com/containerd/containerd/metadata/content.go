@@ -487,7 +487,7 @@ type namespacedWriter struct {
 	ctx       context.Context
 	ref       string
 	namespace string
-	db        transactor
+	db        Transactor
 	provider  interface {
 		content.Provider
 		content.Ingester

@@ -80,7 +80,7 @@ type dbOptions struct {
 // while proxying data shared across namespaces to backend
 // datastores for content and snapshots.
 type DB struct {
-	db *bolt.DB
+	db Transactor
 	ss map[string]*snapshotter
 	cs *contentStore
 
@@ -115,7 +115,7 @@ type DB struct {
 
 // NewDB creates a new metadata database using the provided
 // bolt database, content store, and snapshotters.
-func NewDB(db *bolt.DB, cs content.Store, ss map[string]snapshots.Snapshotter, opts ...DBOpt) *DB {
+func NewDB(db Transactor, cs content.Store, ss map[string]snapshots.Snapshotter, opts ...DBOpt) *DB {
 	m := &DB{
 		db:      db,
 		ss:      make(map[string]*snapshotter, len(ss)),

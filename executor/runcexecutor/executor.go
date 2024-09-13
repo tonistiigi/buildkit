@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/moby/buildkit/util/bklog"
+	"github.com/prometheus/procfs"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -527,6 +528,18 @@ func (k procKiller) Cleanup() {
 	}
 }
 
+func debugOpenProcesses(ctx context.Context) {
+	procs, err := procfs.AllProcs()
+	if err != nil {
+		bklog.G(ctx).Errorf("failed to list processes: %v", err)
+		return
+	}
+	for _, p := range procs {
+		comm, _ := p.Comm()
+		bklog.G(ctx).Debugf("> %d %s", p.PID, comm)
+	}
+}
+
 // Kill will send SIGKILL to the process running inside the container.
 // If the process was created by `runc run` then we will use `runc kill`,
 // otherwise for `runc exec` we will read the pid from a pidfile and then
@@ -535,6 +548,9 @@ func (k procKiller) Kill(ctx context.Context) (err error) {
 	bklog.G(ctx).Debugf("sending sigkill to process in container %s", k.id)
 	defer func() {
 		bklog.G(ctx).Errorf("completed to kill process in container id %s: %+v", k.id, err)
+		if err != nil {
+			debugOpenProcesses(ctx)
+		}
 	}()
 
 	// this timeout is generally a no-op, the Kill ctx should already have a

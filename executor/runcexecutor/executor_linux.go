@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/containerd/console"
 	runc "github.com/containerd/go-runc"
@@ -33,12 +34,15 @@ func (w *runcExecutor) run(ctx context.Context, id, bundle string, process execu
 		if keep {
 			extraArgs = append(extraArgs, "--keep")
 		}
+		now := time.Now()
+		bklog.G(ctx).Debugf("runc run %s %s", id, bundle)
 		_, err := w.runc.Run(ctx, id, bundle, &runc.CreateOpts{
 			NoPivot:   w.noPivot,
 			Started:   started,
 			IO:        io,
 			ExtraArgs: extraArgs,
 		})
+		bklog.G(ctx).Debugf("runc run %s %s took %s, err: %v", id, bundle, time.Since(now), err)
 		return err
 	})
 }
@@ -75,15 +79,21 @@ func (w *runcExecutor) callWithIO(ctx context.Context, process executor.ProcessI
 
 	startedCh := make(chan int, 1)
 	eg.Go(func() error {
-		return runcProcess.WaitForStart(ctx, startedCh, started)
+		err := runcProcess.WaitForStart(ctx, startedCh, started)
+		defer bklog.G(ctx).Debugf("waitForStart done: %v", err)
+		return err
 	})
 
 	eg.Go(func() error {
-		return handleSignals(ctx, runcProcess, process.Signal)
+		err := handleSignals(ctx, runcProcess, process.Signal)
+		bklog.G(ctx).Debugf("handleSignals done: %v", err)
+		return err
 	})
 
 	if !process.Meta.Tty {
-		return call(ctx, startedCh, &forwardIO{stdin: process.Stdin, stdout: process.Stdout, stderr: process.Stderr}, killer.pidfile)
+		err := call(ctx, startedCh, &forwardIO{stdin: process.Stdin, stdout: process.Stdout, stderr: process.Stderr}, killer.pidfile)
+		bklog.G(ctx).Debugf("call done: %v", err)
+		return err
 	}
 
 	ptm, ptsName, err := console.NewPty()
@@ -175,7 +185,9 @@ func (w *runcExecutor) callWithIO(ctx context.Context, process executor.ProcessI
 		runcIO.stderr = pts
 	}
 
-	return call(ctx, startedCh, runcIO, killer.pidfile)
+	err = call(ctx, startedCh, runcIO, killer.pidfile)
+	bklog.G(ctx).Debugf("call done (TTY): %v", err)
+	return err
 }
 
 func detectOOM(ctx context.Context, ns string, gwErr *gatewayapi.ExitError) {

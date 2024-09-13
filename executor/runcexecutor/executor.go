@@ -534,9 +534,7 @@ func (k procKiller) Cleanup() {
 func (k procKiller) Kill(ctx context.Context) (err error) {
 	bklog.G(ctx).Debugf("sending sigkill to process in container %s", k.id)
 	defer func() {
-		if err != nil {
-			bklog.G(ctx).Errorf("failed to kill process in container id %s: %+v", k.id, err)
-		}
+		bklog.G(ctx).Errorf("completed to kill process in container id %s: %+v", k.id, err)
 	}()
 
 	// this timeout is generally a no-op, the Kill ctx should already have a
@@ -546,6 +544,7 @@ func (k procKiller) Kill(ctx context.Context) (err error) {
 	defer cancel(errors.WithStack(context.Canceled))
 
 	if k.pidfile == "" {
+		bklog.G(ctx).Debugf("sending sigkill via runc process %s", k.id)
 		// for `runc run` process we use `runc kill` to terminate the process
 		return k.runC.Kill(ctx, k.id, int(syscall.SIGKILL), nil)
 	}
@@ -580,6 +579,7 @@ func (k procKiller) Kill(ctx context.Context) (err error) {
 		return errors.Wrapf(err, "failed to find process for pid %d from pidfile", pid)
 	}
 	defer process.Release()
+	bklog.G(ctx).Debugf("sending sigkill to pid %d", pid)
 	return process.Signal(syscall.SIGKILL)
 }
 
@@ -614,14 +614,18 @@ func runcProcessHandle(ctx context.Context, killer procKiller) (*procHandle, con
 	// preserve the logger on the context used for the runc process handling
 	runcCtx = bklog.WithLogger(runcCtx, bklog.G(ctx))
 
+	bklog.G(ctx).Debug("starting runc process monitor")
+
 	go func() {
 		// Wait for pid
 		select {
 		case <-p.ended:
+			bklog.G(ctx).Debug("runc process monitor ended (0)")
 			return // nothing to kill
 		case <-p.ready:
 			select {
 			case <-p.ended:
+				bklog.G(ctx).Debug("runc process monitor ended (1)")
 				return
 			default:
 			}
@@ -636,17 +640,23 @@ func runcProcessHandle(ctx context.Context, killer procKiller) (*procHandle, con
 					select {
 					case <-killCtx.Done():
 						cancel(errors.WithStack(context.Cause(ctx)))
+						bklog.G(ctx).Errorf("returning via killCtx: %+v", err)
 						return
 					default:
 					}
+					bklog.G(ctx).Errorf("failed to kill process: %v", err)
+				} else {
+					bklog.G(ctx).Debug("killed process")
 				}
 				timeout(errors.WithStack(context.Canceled))
 				select {
 				case <-time.After(50 * time.Millisecond):
 				case <-p.ended:
+					bklog.G(ctx).Debug("runc process monitor ended (2)")
 					return
 				}
 			case <-p.ended:
+				bklog.G(ctx).Debug("runc process monitor ended (3)")
 				return
 			}
 		}
@@ -657,6 +667,7 @@ func runcProcessHandle(ctx context.Context, killer procKiller) (*procHandle, con
 
 // Release will free resources with a procHandle.
 func (p *procHandle) Release() {
+	bklog.G(context.Background()).Debug("releasing runc process monitor")
 	close(p.ended)
 	if p.monitorProcess != nil {
 		p.monitorProcess.Release()

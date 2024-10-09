@@ -18,6 +18,7 @@ var (
 
 var (
 	UserCNIConfigPath = DefaultCNIConfigPath
+	CDISpecDirs       = nil
 )
 
 func UserAddress() string {

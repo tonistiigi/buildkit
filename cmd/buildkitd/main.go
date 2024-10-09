@@ -76,6 +76,7 @@ import (
 	"google.golang.org/grpc/health"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+	"tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
 func init() {
@@ -221,6 +222,14 @@ func main() {
 			Name:  "otel-socket-path",
 			Usage: "OTEL collector trace socket path",
 		},
+		cli.BoolFlag{
+			Name:  "cdi-enabled",
+			Usage: "enables support of the Container Device Interface (CDI)",
+		},
+		cli.StringSliceFlag{
+			Name:  "cdi-spec-dir",
+			Usage: "list of directories to scan for CDI spec files",
+		},
 	)
 	app.Flags = append(app.Flags, appFlags...)
 	app.Flags = append(app.Flags, serviceFlags()...)
@@ -285,6 +294,12 @@ func main() {
 			return err
 		}
 		closers = append(closers, mp.Shutdown)
+
+		if cfg.CDI.Enabled != nil && *cfg.CDI.Enabled {
+			if err := cdi.Configure(cdi.WithSpecDirs(cfg.CDI.SpecDirs...)); err != nil {
+				return errors.Wrap(err, "failed to configure CDI registry")
+			}
+		}
 
 		statsHandler := tracing.ServerStatsHandler(
 			otelgrpc.WithTracerProvider(tp),
@@ -542,6 +557,10 @@ func setDefaultConfig(cfg *config.Config) {
 	if cfg.OTEL.SocketPath == "" {
 		cfg.OTEL.SocketPath = appdefaults.TraceSocketPath(isRootlessConfig())
 	}
+
+	if len(cfg.CDI.SpecDirs) == 0 {
+		cfg.CDI.SpecDirs = appdefaults.CDISpecDirs
+	}
 }
 
 var (
@@ -630,6 +649,14 @@ func applyMainFlags(c *cli.Context, cfg *config.Config) error {
 
 	if c.IsSet("otel-socket-path") {
 		cfg.OTEL.SocketPath = c.String("otel-socket-path")
+	}
+
+	if c.IsSet("cdi-enabled") {
+		cdiEnabled := c.Bool("cdi-enabled")
+		cfg.CDI.Enabled = &cdiEnabled
+	}
+	if c.IsSet("cdi-spec-dir") {
+		cfg.CDI.SpecDirs = c.StringSlice("cdi-spec-dir")
 	}
 
 	applyPlatformFlags(c)

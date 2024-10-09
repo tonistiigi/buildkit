@@ -21,11 +21,12 @@ const buildkitdConfigFile = "buildkitd.toml"
 type sandbox struct {
 	Backend
 
-	logs    map[string]*bytes.Buffer
-	cleanup *MultiCloser
-	mv      matrixValue
-	ctx     context.Context
-	name    string
+	logs       map[string]*bytes.Buffer
+	cleanup    *MultiCloser
+	mv         matrixValue
+	ctx        context.Context
+	cdiSpecDir string
+	name       string
 }
 
 func (sb *sandbox) Name() string {
@@ -34,6 +35,10 @@ func (sb *sandbox) Name() string {
 
 func (sb *sandbox) Context() context.Context {
 	return sb.ctx
+}
+
+func (sb *sandbox) CDISpecDir() string {
+	return sb.cdiSpecDir
 }
 
 func (sb *sandbox) Logs() map[string]*bytes.Buffer {
@@ -104,6 +109,15 @@ func newSandbox(ctx context.Context, w Worker, mirror string, mv matrixValue) (s
 		}
 	}()
 
+	cdiSpecDir, err := os.MkdirTemp("", "buildkit-integration-cdi")
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "cannot create cdi spec dir")
+	}
+	deferF.Append(func() error {
+		return os.RemoveAll(cdiSpecDir)
+	})
+	cfg.CDISpecDir = cdiSpecDir
+
 	b, closer, err := w.New(ctx, cfg)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "creating worker")
@@ -111,12 +125,13 @@ func newSandbox(ctx context.Context, w Worker, mirror string, mv matrixValue) (s
 	deferF.Append(closer)
 
 	return &sandbox{
-		Backend: b,
-		logs:    cfg.Logs,
-		cleanup: deferF,
-		mv:      mv,
-		ctx:     ctx,
-		name:    w.Name(),
+		Backend:    b,
+		logs:       cfg.Logs,
+		cleanup:    deferF,
+		mv:         mv,
+		ctx:        ctx,
+		cdiSpecDir: cfg.CDISpecDir,
+		name:       w.Name(),
 	}, cl, nil
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/leaseutil"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
+	"tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
 type Worker interface {
@@ -40,6 +41,7 @@ type Worker interface {
 	Executor() executor.Executor
 	CacheManager() cache.Manager
 	LeaseManager() *leaseutil.Manager
+	CDIManager() *cdi.Cache
 }
 
 type Infos interface {

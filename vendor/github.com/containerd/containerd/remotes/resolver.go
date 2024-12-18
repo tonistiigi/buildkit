@@ -1,3 +1,19 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package remotes
 
 import (
@@ -5,6 +21,7 @@ import (
 	"io"
 
 	"github.com/containerd/containerd/content"
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -17,7 +34,7 @@ type Resolver interface {
 	// reference a specific host or be matched against a specific handler.
 	//
 	// The returned name should be used to identify the referenced entity.
-	// Dependending on the remote namespace, this may be immutable or mutable.
+	// Depending on the remote namespace, this may be immutable or mutable.
 	// While the name may differ from ref, it should itself be a valid ref.
 	//
 	// If the resolution fails, an error will be returned.
@@ -29,13 +46,26 @@ type Resolver interface {
 	Fetcher(ctx context.Context, ref string) (Fetcher, error)
 
 	// Pusher returns a new pusher for the provided reference
+	// The returned Pusher should satisfy content.Ingester and concurrent attempts
+	// to push the same blob using the Ingester API should result in ErrUnavailable.
 	Pusher(ctx context.Context, ref string) (Pusher, error)
 }
 
-// Fetcher fetches content
+// Fetcher fetches content.
+// A fetcher implementation may implement the FetcherByDigest interface too.
 type Fetcher interface {
 	// Fetch the resource identified by the descriptor.
 	Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, error)
+}
+
+// FetcherByDigest fetches content by the digest.
+type FetcherByDigest interface {
+	// FetchByDigest fetches the resource identified by the digest.
+	//
+	// FetcherByDigest usually returns an incomplete descriptor.
+	// Typically, the media type is always set to "application/octet-stream",
+	// and the annotations are unset.
+	FetchByDigest(ctx context.Context, dgst digest.Digest) (io.ReadCloser, ocispec.Descriptor, error)
 }
 
 // Pusher pushes content
@@ -56,9 +86,9 @@ func (fn FetcherFunc) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.Re
 
 // PusherFunc allows package users to implement a Pusher with just a
 // function.
-type PusherFunc func(ctx context.Context, desc ocispec.Descriptor, r io.Reader) error
+type PusherFunc func(ctx context.Context, desc ocispec.Descriptor) (content.Writer, error)
 
 // Push content
-func (fn PusherFunc) Push(ctx context.Context, desc ocispec.Descriptor, r io.Reader) error {
-	return fn(ctx, desc, r)
+func (fn PusherFunc) Push(ctx context.Context, desc ocispec.Descriptor) (content.Writer, error) {
+	return fn(ctx, desc)
 }

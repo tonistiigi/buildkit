@@ -1,3 +1,19 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package metadata
 
 import (
@@ -7,6 +23,9 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/filters"
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/leases"
+	"github.com/containerd/containerd/sandbox"
+	"github.com/containerd/containerd/snapshots"
 )
 
 func adaptImage(o interface{}) filters.Adaptor {
@@ -34,6 +53,8 @@ func adaptImage(o interface{}) filters.Adaptor {
 			return checkMap(fieldpath[1:], obj.Labels)
 			// TODO(stevvooe): Greater/Less than filters would be awesome for
 			// size. Let's do it!
+		case "annotations":
+			return checkMap(fieldpath[1:], obj.Target.Annotations)
 		}
 
 		return "", false
@@ -70,25 +91,6 @@ func adaptContainer(o interface{}) filters.Adaptor {
 	})
 }
 
-func adaptContentInfo(info content.Info) filters.Adaptor {
-	return filters.AdapterFunc(func(fieldpath []string) (string, bool) {
-		if len(fieldpath) == 0 {
-			return "", false
-		}
-
-		switch fieldpath[0] {
-		case "digest":
-			return info.Digest.String(), true
-		case "size":
-			// TODO: support size based filtering
-		case "labels":
-			return checkMap(fieldpath[1:], info.Labels)
-		}
-
-		return "", false
-	})
-}
-
 func adaptContentStatus(status content.Status) filters.Adaptor {
 	return filters.AdapterFunc(func(fieldpath []string) (string, bool) {
 		if len(fieldpath) == 0 {
@@ -100,6 +102,68 @@ func adaptContentStatus(status content.Status) filters.Adaptor {
 		}
 
 		return "", false
+	})
+}
+
+func adaptLease(lease leases.Lease) filters.Adaptor {
+	return filters.AdapterFunc(func(fieldpath []string) (string, bool) {
+		if len(fieldpath) == 0 {
+			return "", false
+		}
+
+		switch fieldpath[0] {
+		case "id":
+			return lease.ID, len(lease.ID) > 0
+		case "labels":
+			return checkMap(fieldpath[1:], lease.Labels)
+		}
+
+		return "", false
+	})
+}
+
+func adaptSnapshot(info snapshots.Info) filters.Adaptor {
+	return filters.AdapterFunc(func(fieldpath []string) (string, bool) {
+		if len(fieldpath) == 0 {
+			return "", false
+		}
+
+		switch fieldpath[0] {
+		case "kind":
+			switch info.Kind {
+			case snapshots.KindActive:
+				return "active", true
+			case snapshots.KindView:
+				return "view", true
+			case snapshots.KindCommitted:
+				return "committed", true
+			}
+		case "name":
+			return info.Name, true
+		case "parent":
+			return info.Parent, true
+		case "labels":
+			return checkMap(fieldpath[1:], info.Labels)
+		}
+
+		return "", false
+	})
+}
+
+func adaptSandbox(instance *sandbox.Sandbox) filters.Adaptor {
+	return filters.AdapterFunc(func(fieldpath []string) (string, bool) {
+		if len(fieldpath) == 0 {
+			return "", false
+		}
+
+		switch fieldpath[0] {
+		case "id":
+			return instance.ID, true
+		case "labels":
+			return checkMap(fieldpath[1:], instance.Labels)
+		default:
+			return "", false
+		}
 	})
 }
 

@@ -1,27 +1,34 @@
 package frontend
 
 import (
-	"io"
+	"context"
 
-	"github.com/moby/buildkit/cache"
+	"github.com/moby/buildkit/client/llb/sourceresolver"
+	"github.com/moby/buildkit/executor"
+	gw "github.com/moby/buildkit/frontend/gateway/client"
+	"github.com/moby/buildkit/session"
+	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/pb"
-	"github.com/moby/buildkit/worker"
+	"github.com/moby/buildkit/solver/result"
 	digest "github.com/opencontainers/go-digest"
-	"golang.org/x/net/context"
 )
 
+type Result = result.Result[solver.ResultProxy]
+
+type Attestation = result.Attestation[solver.ResultProxy]
+
 type Frontend interface {
-	Solve(ctx context.Context, llb FrontendLLBBridge, opt map[string]string) (cache.ImmutableRef, map[string][]byte, error)
+	Solve(ctx context.Context, llb FrontendLLBBridge, exec executor.Executor, opt map[string]string, inputs map[string]*pb.Definition, sid string, sm *session.Manager) (*Result, error)
 }
 
 type FrontendLLBBridge interface {
-	Solve(ctx context.Context, req SolveRequest) (cache.ImmutableRef, map[string][]byte, error)
-	ResolveImageConfig(ctx context.Context, ref string) (digest.Digest, []byte, error)
-	Exec(ctx context.Context, meta worker.Meta, rootfs cache.ImmutableRef, stdin io.ReadCloser, stdout, stderr io.WriteCloser) error
+	sourceresolver.MetaResolver
+	Solve(ctx context.Context, req SolveRequest, sid string) (*Result, error)
+	Warn(ctx context.Context, dgst digest.Digest, msg string, opts WarnOpts) error
 }
 
-type SolveRequest struct {
-	Definition  *pb.Definition
-	Frontend    string
-	FrontendOpt map[string]string
-}
+type SolveRequest = gw.SolveRequest
+
+type CacheOptionsEntry = gw.CacheOptionsEntry
+
+type WarnOpts = gw.WarnOpts

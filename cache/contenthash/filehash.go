@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/tonistiigi/fsutil"
+	fstypes "github.com/tonistiigi/fsutil/types"
 )
 
 // NewFileHash returns new hash that is used for the builder cache keys
@@ -22,11 +22,15 @@ func NewFileHash(path string, fi os.FileInfo) (hash.Hash, error) {
 		}
 	}
 
-	stat := &fsutil.Stat{
+	stat := &fstypes.Stat{
 		Mode:     uint32(fi.Mode()),
-		Size_:    fi.Size(),
+		Size:     fi.Size(),
 		ModTime:  fi.ModTime().UnixNano(),
 		Linkname: link,
+	}
+
+	if fi.Mode()&os.ModeSymlink != 0 {
+		stat.Mode = stat.Mode | 0777
 	}
 
 	if err := setUnixOpt(path, fi, stat); err != nil {
@@ -35,21 +39,25 @@ func NewFileHash(path string, fi os.FileInfo) (hash.Hash, error) {
 	return NewFromStat(stat)
 }
 
-func NewFromStat(stat *fsutil.Stat) (hash.Hash, error) {
+func NewFromStat(stat *fstypes.Stat) (hash.Hash, error) {
+	// Clear the socket bit since archive/tar.FileInfoHeader does not handle it
+	stat.Mode &^= uint32(os.ModeSocket)
+
 	fi := &statInfo{stat}
 	hdr, err := tar.FileInfoHeader(fi, stat.Linkname)
 	if err != nil {
 		return nil, err
 	}
 	hdr.Name = "" // note: empty name is different from current has in docker build. Name is added on recursive directory scan instead
-	hdr.Mode = int64(chmodWindowsTarEntry(os.FileMode(hdr.Mode)))
 	hdr.Devmajor = stat.Devmajor
 	hdr.Devminor = stat.Devminor
+	hdr.Uid = int(stat.Uid)
+	hdr.Gid = int(stat.Gid)
 
 	if len(stat.Xattrs) > 0 {
-		hdr.Xattrs = make(map[string]string, len(stat.Xattrs))
+		hdr.PAXRecords = make(map[string]string, len(stat.Xattrs))
 		for k, v := range stat.Xattrs {
-			hdr.Xattrs[k] = string(v)
+			hdr.PAXRecords["SCHILY.xattr."+k] = string(v)
 		}
 	}
 	// fmt.Printf("hdr: %#v\n", hdr)
@@ -71,24 +79,29 @@ func (tsh *tarsumHash) Reset() {
 }
 
 type statInfo struct {
-	*fsutil.Stat
+	*fstypes.Stat
 }
 
 func (s *statInfo) Name() string {
 	return filepath.Base(s.Stat.Path)
 }
+
 func (s *statInfo) Size() int64 {
-	return s.Stat.Size_
+	return s.Stat.Size
 }
+
 func (s *statInfo) Mode() os.FileMode {
 	return os.FileMode(s.Stat.Mode)
 }
+
 func (s *statInfo) ModTime() time.Time {
 	return time.Unix(s.Stat.ModTime/1e9, s.Stat.ModTime%1e9)
 }
+
 func (s *statInfo) IsDir() bool {
 	return s.Mode().IsDir()
 }
+
 func (s *statInfo) Sys() interface{} {
 	return s.Stat
 }

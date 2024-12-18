@@ -1,11 +1,28 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package metadata
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/boltdb/bolt"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/filters"
@@ -13,19 +30,20 @@ import (
 	"github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/metadata/boltutil"
 	"github.com/containerd/containerd/namespaces"
-	"github.com/gogo/protobuf/proto"
-	"github.com/gogo/protobuf/types"
-	"github.com/pkg/errors"
+	"github.com/containerd/containerd/protobuf/proto"
+	"github.com/containerd/containerd/protobuf/types"
+	"github.com/containerd/typeurl/v2"
+	bolt "go.etcd.io/bbolt"
 )
 
 type containerStore struct {
-	tx *bolt.Tx
+	db *DB
 }
 
 // NewContainerStore returns a Store backed by an underlying bolt DB
-func NewContainerStore(tx *bolt.Tx) containers.Store {
+func NewContainerStore(db *DB) containers.Store {
 	return &containerStore{
-		tx: tx,
+		db: db,
 	}
 }
 
@@ -35,14 +53,21 @@ func (s *containerStore) Get(ctx context.Context, id string) (containers.Contain
 		return containers.Container{}, err
 	}
 
-	bkt := getContainerBucket(s.tx, namespace, id)
-	if bkt == nil {
-		return containers.Container{}, errors.Wrapf(errdefs.ErrNotFound, "bucket name %q:%q", namespace, id)
-	}
-
 	container := containers.Container{ID: id}
-	if err := readContainer(&container, bkt); err != nil {
-		return containers.Container{}, errors.Wrapf(err, "failed to read container %v", id)
+
+	if err := view(ctx, s.db, func(tx *bolt.Tx) error {
+		bkt := getContainerBucket(tx, namespace, id)
+		if bkt == nil {
+			return fmt.Errorf("container %q in namespace %q: %w", id, namespace, errdefs.ErrNotFound)
+		}
+
+		if err := readContainer(&container, bkt); err != nil {
+			return fmt.Errorf("failed to read container %q: %w", id, err)
+		}
+
+		return nil
+	}); err != nil {
+		return containers.Container{}, err
 	}
 
 	return container, nil
@@ -56,30 +81,33 @@ func (s *containerStore) List(ctx context.Context, fs ...string) ([]containers.C
 
 	filter, err := filters.ParseAll(fs...)
 	if err != nil {
-		return nil, errors.Wrapf(errdefs.ErrInvalidArgument, err.Error())
-	}
-
-	bkt := getContainersBucket(s.tx, namespace)
-	if bkt == nil {
-		return nil, nil
+		return nil, fmt.Errorf("%s: %w", err.Error(), errdefs.ErrInvalidArgument)
 	}
 
 	var m []containers.Container
-	if err := bkt.ForEach(func(k, v []byte) error {
-		cbkt := bkt.Bucket(k)
-		if cbkt == nil {
+
+	if err := view(ctx, s.db, func(tx *bolt.Tx) error {
+		bkt := getContainersBucket(tx, namespace)
+		if bkt == nil {
+			return nil // empty store
+		}
+
+		return bkt.ForEach(func(k, v []byte) error {
+			cbkt := bkt.Bucket(k)
+			if cbkt == nil {
+				return nil
+			}
+			container := containers.Container{ID: string(k)}
+
+			if err := readContainer(&container, cbkt); err != nil {
+				return fmt.Errorf("failed to read container %q: %w", string(k), err)
+			}
+
+			if filter.Match(adaptContainer(container)) {
+				m = append(m, container)
+			}
 			return nil
-		}
-		container := containers.Container{ID: string(k)}
-
-		if err := readContainer(&container, cbkt); err != nil {
-			return errors.Wrap(err, "failed to read container")
-		}
-
-		if filter.Match(adaptContainer(container)) {
-			m = append(m, container)
-		}
-		return nil
+		})
 	}); err != nil {
 		return nil, err
 	}
@@ -94,26 +122,32 @@ func (s *containerStore) Create(ctx context.Context, container containers.Contai
 	}
 
 	if err := validateContainer(&container); err != nil {
-		return containers.Container{}, errors.Wrap(err, "create container failed validation")
+		return containers.Container{}, fmt.Errorf("create container failed validation: %w", err)
 	}
 
-	bkt, err := createContainersBucket(s.tx, namespace)
-	if err != nil {
-		return containers.Container{}, err
-	}
-
-	cbkt, err := bkt.CreateBucket([]byte(container.ID))
-	if err != nil {
-		if err == bolt.ErrBucketExists {
-			err = errors.Wrapf(errdefs.ErrAlreadyExists, "container %q", container.ID)
+	if err := update(ctx, s.db, func(tx *bolt.Tx) error {
+		bkt, err := createContainersBucket(tx, namespace)
+		if err != nil {
+			return err
 		}
-		return containers.Container{}, err
-	}
 
-	container.CreatedAt = time.Now().UTC()
-	container.UpdatedAt = container.CreatedAt
-	if err := writeContainer(cbkt, &container); err != nil {
-		return containers.Container{}, errors.Wrap(err, "failed to write container")
+		cbkt, err := bkt.CreateBucket([]byte(container.ID))
+		if err != nil {
+			if err == bolt.ErrBucketExists {
+				err = fmt.Errorf("container %q: %w", container.ID, errdefs.ErrAlreadyExists)
+			}
+			return err
+		}
+
+		container.CreatedAt = time.Now().UTC()
+		container.UpdatedAt = container.CreatedAt
+		if err := writeContainer(cbkt, &container); err != nil {
+			return fmt.Errorf("failed to write container %q: %w", container.ID, err)
+		}
+
+		return nil
+	}); err != nil {
+		return containers.Container{}, err
 	}
 
 	return container, nil
@@ -126,92 +160,94 @@ func (s *containerStore) Update(ctx context.Context, container containers.Contai
 	}
 
 	if container.ID == "" {
-		return containers.Container{}, errors.Wrapf(errdefs.ErrInvalidArgument, "must specify a container id")
-	}
-
-	bkt := getContainersBucket(s.tx, namespace)
-	if bkt == nil {
-		return containers.Container{}, errors.Wrapf(errdefs.ErrNotFound, "container %q", container.ID)
-	}
-
-	cbkt := bkt.Bucket([]byte(container.ID))
-	if cbkt == nil {
-		return containers.Container{}, errors.Wrapf(errdefs.ErrNotFound, "container %q", container.ID)
+		return containers.Container{}, fmt.Errorf("must specify a container id: %w", errdefs.ErrInvalidArgument)
 	}
 
 	var updated containers.Container
-	if err := readContainer(&updated, cbkt); err != nil {
-		return updated, errors.Wrapf(err, "failed to read container from bucket")
-	}
-	createdat := updated.CreatedAt
-	updated.ID = container.ID
-
-	if len(fieldpaths) == 0 {
-		// only allow updates to these field on full replace.
-		fieldpaths = []string{"labels", "spec", "extensions"}
-
-		// Fields that are immutable must cause an error when no field paths
-		// are provided. This allows these fields to become mutable in the
-		// future.
-		if updated.Image != container.Image {
-			return containers.Container{}, errors.Wrapf(errdefs.ErrInvalidArgument, "container.Image field is immutable")
+	if err := update(ctx, s.db, func(tx *bolt.Tx) error {
+		bkt := getContainersBucket(tx, namespace)
+		if bkt == nil {
+			return fmt.Errorf("cannot update container %q in namespace %q: %w", container.ID, namespace, errdefs.ErrNotFound)
 		}
 
-		if updated.SnapshotKey != container.SnapshotKey {
-			return containers.Container{}, errors.Wrapf(errdefs.ErrInvalidArgument, "container.SnapshotKey field is immutable")
+		cbkt := bkt.Bucket([]byte(container.ID))
+		if cbkt == nil {
+			return fmt.Errorf("container %q: %w", container.ID, errdefs.ErrNotFound)
 		}
 
-		if updated.Snapshotter != container.Snapshotter {
-			return containers.Container{}, errors.Wrapf(errdefs.ErrInvalidArgument, "container.Snapshotter field is immutable")
+		if err := readContainer(&updated, cbkt); err != nil {
+			return fmt.Errorf("failed to read container %q: %w", container.ID, err)
 		}
+		createdat := updated.CreatedAt
+		updated.ID = container.ID
 
-		if updated.Runtime.Name != container.Runtime.Name {
-			return containers.Container{}, errors.Wrapf(errdefs.ErrInvalidArgument, "container.Runtime.Name field is immutable")
-		}
-	}
+		if len(fieldpaths) == 0 {
+			// only allow updates to these field on full replace.
+			fieldpaths = []string{"labels", "spec", "extensions", "image", "snapshotkey"}
 
-	// apply the field mask. If you update this code, you better follow the
-	// field mask rules in field_mask.proto. If you don't know what this
-	// is, do not update this code.
-	for _, path := range fieldpaths {
-		if strings.HasPrefix(path, "labels.") {
-			if updated.Labels == nil {
-				updated.Labels = map[string]string{}
+			// Fields that are immutable must cause an error when no field paths
+			// are provided. This allows these fields to become mutable in the
+			// future.
+			if updated.Snapshotter != container.Snapshotter {
+				return fmt.Errorf("container.Snapshotter field is immutable: %w", errdefs.ErrInvalidArgument)
 			}
-			key := strings.TrimPrefix(path, "labels.")
-			updated.Labels[key] = container.Labels[key]
-			continue
-		}
 
-		if strings.HasPrefix(path, "extensions.") {
-			if updated.Extensions == nil {
-				updated.Extensions = map[string]types.Any{}
+			if updated.Runtime.Name != container.Runtime.Name {
+				return fmt.Errorf("container.Runtime.Name field is immutable: %w", errdefs.ErrInvalidArgument)
 			}
-			key := strings.TrimPrefix(path, "extensions.")
-			updated.Extensions[key] = container.Extensions[key]
-			continue
 		}
 
-		switch path {
-		case "labels":
-			updated.Labels = container.Labels
-		case "spec":
-			updated.Spec = container.Spec
-		case "extensions":
-			updated.Extensions = container.Extensions
-		default:
-			return containers.Container{}, errors.Wrapf(errdefs.ErrInvalidArgument, "cannot update %q field on %q", path, container.ID)
+		// apply the field mask. If you update this code, you better follow the
+		// field mask rules in field_mask.proto. If you don't know what this
+		// is, do not update this code.
+		for _, path := range fieldpaths {
+			if strings.HasPrefix(path, "labels.") {
+				if updated.Labels == nil {
+					updated.Labels = map[string]string{}
+				}
+				key := strings.TrimPrefix(path, "labels.")
+				updated.Labels[key] = container.Labels[key]
+				continue
+			}
+
+			if strings.HasPrefix(path, "extensions.") {
+				if updated.Extensions == nil {
+					updated.Extensions = map[string]typeurl.Any{}
+				}
+				key := strings.TrimPrefix(path, "extensions.")
+				updated.Extensions[key] = container.Extensions[key]
+				continue
+			}
+
+			switch path {
+			case "labels":
+				updated.Labels = container.Labels
+			case "spec":
+				updated.Spec = container.Spec
+			case "extensions":
+				updated.Extensions = container.Extensions
+			case "image":
+				updated.Image = container.Image
+			case "snapshotkey":
+				updated.SnapshotKey = container.SnapshotKey
+			default:
+				return fmt.Errorf("cannot update %q field on %q: %w", path, container.ID, errdefs.ErrInvalidArgument)
+			}
 		}
-	}
 
-	if err := validateContainer(&updated); err != nil {
-		return containers.Container{}, errors.Wrap(err, "update failed validation")
-	}
+		if err := validateContainer(&updated); err != nil {
+			return fmt.Errorf("update failed validation: %w", err)
+		}
 
-	updated.CreatedAt = createdat
-	updated.UpdatedAt = time.Now().UTC()
-	if err := writeContainer(cbkt, &updated); err != nil {
-		return containers.Container{}, errors.Wrap(err, "failed to write container")
+		updated.CreatedAt = createdat
+		updated.UpdatedAt = time.Now().UTC()
+		if err := writeContainer(cbkt, &updated); err != nil {
+			return fmt.Errorf("failed to write container %q: %w", container.ID, err)
+		}
+
+		return nil
+	}); err != nil {
+		return containers.Container{}, err
 	}
 
 	return updated, nil
@@ -223,45 +259,53 @@ func (s *containerStore) Delete(ctx context.Context, id string) error {
 		return err
 	}
 
-	bkt := getContainersBucket(s.tx, namespace)
-	if bkt == nil {
-		return errors.Wrapf(errdefs.ErrNotFound, "cannot delete container %v, bucket not present", id)
-	}
+	return update(ctx, s.db, func(tx *bolt.Tx) error {
+		bkt := getContainersBucket(tx, namespace)
+		if bkt == nil {
+			return fmt.Errorf("cannot delete container %q in namespace %q: %w", id, namespace, errdefs.ErrNotFound)
+		}
 
-	if err := bkt.DeleteBucket([]byte(id)); err == bolt.ErrBucketNotFound {
-		return errors.Wrapf(errdefs.ErrNotFound, "container %v", id)
-	}
-	return err
+		if err := bkt.DeleteBucket([]byte(id)); err != nil {
+			if err == bolt.ErrBucketNotFound {
+				err = fmt.Errorf("container %v: %w", id, errdefs.ErrNotFound)
+			}
+			return err
+		}
+
+		atomic.AddUint32(&s.db.dirty, 1)
+
+		return nil
+	})
 }
 
 func validateContainer(container *containers.Container) error {
 	if err := identifiers.Validate(container.ID); err != nil {
-		return errors.Wrapf(err, "container.ID validation error")
+		return fmt.Errorf("container.ID: %w", err)
 	}
 
 	for k := range container.Extensions {
 		if k == "" {
-			return errors.Wrapf(errdefs.ErrInvalidArgument, "container.Extension keys must not be zero-length")
+			return fmt.Errorf("container.Extension keys must not be zero-length: %w", errdefs.ErrInvalidArgument)
 		}
 	}
 
 	// image has no validation
 	for k, v := range container.Labels {
-		if err := labels.Validate(k, v); err == nil {
-			return errors.Wrapf(err, "containers.Labels")
+		if err := labels.Validate(k, v); err != nil {
+			return fmt.Errorf("containers.Labels: %w", err)
 		}
 	}
 
 	if container.Runtime.Name == "" {
-		return errors.Wrapf(errdefs.ErrInvalidArgument, "container.Runtime.Name must be set")
+		return fmt.Errorf("container.Runtime.Name must be set: %w", errdefs.ErrInvalidArgument)
 	}
 
 	if container.Spec == nil {
-		return errors.Wrapf(errdefs.ErrInvalidArgument, "container.Spec must be set")
+		return fmt.Errorf("container.Spec must be set: %w", errdefs.ErrInvalidArgument)
 	}
 
 	if container.SnapshotKey != "" && container.Snapshotter == "" {
-		return errors.Wrapf(errdefs.ErrInvalidArgument, "container.Snapshotter must be set if container.SnapshotKey is set")
+		return fmt.Errorf("container.Snapshotter must be set if container.SnapshotKey is set: %w", errdefs.ErrInvalidArgument)
 	}
 
 	return nil
@@ -293,16 +337,11 @@ func readContainer(container *containers.Container, bkt *bolt.Bucket) error {
 				container.Runtime.Name = string(n)
 			}
 
-			obkt := rbkt.Get(bucketKeyOptions)
-			if obkt == nil {
-				return nil
-			}
-
-			var any types.Any
-			if err := proto.Unmarshal(obkt, &any); err != nil {
+			any, err := boltutil.ReadAny(rbkt, bucketKeyOptions)
+			if err != nil {
 				return err
 			}
-			container.Runtime.Options = &any
+			container.Runtime.Options = any
 		case string(bucketKeySpec):
 			var any types.Any
 			if err := proto.Unmarshal(v, &any); err != nil {
@@ -314,26 +353,14 @@ func readContainer(container *containers.Container, bkt *bolt.Bucket) error {
 		case string(bucketKeySnapshotter):
 			container.Snapshotter = string(v)
 		case string(bucketKeyExtensions):
-			ebkt := bkt.Bucket(bucketKeyExtensions)
-			if ebkt == nil {
-				return nil
-			}
-
-			extensions := make(map[string]types.Any)
-			if err := ebkt.ForEach(func(k, v []byte) error {
-				var a types.Any
-				if err := proto.Unmarshal(v, &a); err != nil {
-					return err
-				}
-
-				extensions[string(k)] = a
-				return nil
-			}); err != nil {
-
+			extensions, err := boltutil.ReadExtensions(bkt)
+			if err != nil {
 				return err
 			}
 
 			container.Extensions = extensions
+		case string(bucketKeySandboxID):
+			container.SandboxID = string(v)
 		}
 
 		return nil
@@ -345,15 +372,8 @@ func writeContainer(bkt *bolt.Bucket, container *containers.Container) error {
 		return err
 	}
 
-	if container.Spec != nil {
-		spec, err := container.Spec.Marshal()
-		if err != nil {
-			return err
-		}
-
-		if err := bkt.Put(bucketKeySpec, spec); err != nil {
-			return err
-		}
+	if err := boltutil.WriteAny(bkt, bucketKeySpec, container.Spec); err != nil {
+		return err
 	}
 
 	for _, v := range [][2][]byte{
@@ -381,33 +401,16 @@ func writeContainer(bkt *bolt.Bucket, container *containers.Container) error {
 		return err
 	}
 
-	if len(container.Extensions) > 0 {
-		ebkt, err := bkt.CreateBucketIfNotExists(bucketKeyExtensions)
-		if err != nil {
-			return err
-		}
-
-		for name, ext := range container.Extensions {
-			p, err := proto.Marshal(&ext)
-			if err != nil {
-				return err
-			}
-
-			if err := ebkt.Put([]byte(name), p); err != nil {
-				return err
-			}
-		}
+	if err := boltutil.WriteExtensions(bkt, container.Extensions); err != nil {
+		return err
 	}
 
-	if container.Runtime.Options != nil {
-		data, err := proto.Marshal(container.Runtime.Options)
-		if err != nil {
-			return err
-		}
+	if err := boltutil.WriteAny(rbkt, bucketKeyOptions, container.Runtime.Options); err != nil {
+		return err
+	}
 
-		if err := rbkt.Put(bucketKeyOptions, data); err != nil {
-			return err
-		}
+	if err := bkt.Put(bucketKeySandboxID, []byte(container.SandboxID)); err != nil {
+		return err
 	}
 
 	return boltutil.WriteLabels(bkt, container.Labels)

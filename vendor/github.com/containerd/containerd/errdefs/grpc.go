@@ -1,9 +1,26 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package errdefs
 
 import (
+	"context"
+	"fmt"
 	"strings"
 
-	"github.com/pkg/errors"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -39,6 +56,10 @@ func ToGRPC(err error) error {
 		return status.Errorf(codes.Unavailable, err.Error())
 	case IsNotImplemented(err):
 		return status.Errorf(codes.Unimplemented, err.Error())
+	case IsCanceled(err):
+		return status.Errorf(codes.Canceled, err.Error())
+	case IsDeadlineExceeded(err):
+		return status.Errorf(codes.DeadlineExceeded, err.Error())
 	}
 
 	return err
@@ -47,9 +68,9 @@ func ToGRPC(err error) error {
 // ToGRPCf maps the error to grpc error codes, assembling the formatting string
 // and combining it with the target error string.
 //
-// This is equivalent to errors.ToGRPC(errors.Wrapf(err, format, args...))
+// This is equivalent to errdefs.ToGRPC(fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), err))
 func ToGRPCf(err error, format string, args ...interface{}) error {
-	return ToGRPC(errors.Wrapf(err, format, args...))
+	return ToGRPC(fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), err))
 }
 
 // FromGRPC returns the underlying error from a grpc service based on the grpc error code
@@ -73,15 +94,19 @@ func FromGRPC(err error) error {
 		cls = ErrFailedPrecondition
 	case codes.Unimplemented:
 		cls = ErrNotImplemented
+	case codes.Canceled:
+		cls = context.Canceled
+	case codes.DeadlineExceeded:
+		cls = context.DeadlineExceeded
 	default:
 		cls = ErrUnknown
 	}
 
 	msg := rebaseMessage(cls, err)
 	if msg != "" {
-		err = errors.Wrapf(cls, msg)
+		err = fmt.Errorf("%s: %w", msg, cls)
 	} else {
-		err = errors.WithStack(cls)
+		err = cls
 	}
 
 	return err

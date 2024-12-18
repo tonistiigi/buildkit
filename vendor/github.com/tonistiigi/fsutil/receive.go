@@ -1,13 +1,54 @@
+// send.go and receive.go describe the fsutil file-transfer protocol, which
+// allows transferring file trees across a network connection.
+//
+// The protocol operates as follows:
+// - The client (the receiver) connects to the server (the sender).
+// - The sender walks the target tree lexicographically and sends a series of
+//   STAT packets that describe each file (an empty stat indicates EOF).
+// - The receiver sends a REQ packet for each file it requires the contents for,
+//   using the ID for the file (determined as its index in the STAT sequence).
+// - The sender sends a DATA packet with byte arrays for the contents of the
+//   file, associated with an ID (an empty array indicates EOF).
+// - Once the receiver has received all files it wants, it sends a FIN packet,
+//   and the file transfer is complete.
+// If an error is encountered on either side, an ERR packet is sent containing
+// a human-readable error.
+//
+// All paths transferred over the protocol are normalized to unix-style paths,
+// regardless of which platforms are present on either side. These path
+// conversions are performed right before sending a STAT packet (for the
+// sender) or right after receiving the corresponding STAT packet (for the
+// receiver); this abstraction doesn't leak into the rest of fsutil, which
+// operates on native platform-specific paths.
+//
+// Note that in the case of cross-platform file transfers, the transfer is
+// best-effort. Some filenames that are valid on a unix sender would not be
+// valid on a windows receiver, so these paths are rejected as they are
+// received. Additionally, file metadata, like user/group owners and xattrs do
+// not have an exact correspondence on windows, and so would be discarded by
+// a windows receiver.
+
 package fsutil
 
 import (
+	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
+	"github.com/tonistiigi/fsutil/types"
 	"golang.org/x/sync/errgroup"
+)
+
+type DiffType int
+
+const (
+	DiffMetadata DiffType = iota
+	DiffNone
+	DiffContent
 )
 
 type ReceiveOpt struct {
@@ -16,10 +57,11 @@ type ReceiveOpt struct {
 	ProgressCb    func(int, bool)
 	Merge         bool
 	Filter        FilterFunc
+	Differ        DiffType
 }
 
 func Receive(ctx context.Context, conn Stream, dest string, opt ReceiveOpt) error {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	r := &receiver{
@@ -32,6 +74,7 @@ func Receive(ctx context.Context, conn Stream, dest string, opt ReceiveOpt) erro
 		progressCb:    opt.ProgressCb,
 		merge:         opt.Merge,
 		filter:        opt.Filter,
+		differ:        opt.Differ,
 	}
 	return r.run(ctx)
 }
@@ -46,6 +89,7 @@ type receiver struct {
 	progressCb func(int, bool)
 	merge      bool
 	filter     FilterFunc
+	differ     DiffType
 
 	notifyHashed   ChangeFunc
 	contentHasher  ContentHasher
@@ -91,14 +135,19 @@ func (w *dynamicWalker) fill(ctx context.Context, pathC chan<- *currentPath) err
 			if !ok {
 				return nil
 			}
-			pathC <- p
+			select {
+			case pathC <- p:
+			case <-ctx.Done():
+				w.err = ctx.Err()
+				close(w.closeCh)
+				return ctx.Err()
+			}
 		case <-ctx.Done():
 			w.err = ctx.Err()
 			close(w.closeCh)
 			return ctx.Err()
 		}
 	}
-	return nil
 }
 
 func (r *receiver) run(ctx context.Context) error {
@@ -119,21 +168,21 @@ func (r *receiver) run(ctx context.Context) error {
 	g.Go(func() (retErr error) {
 		defer func() {
 			if retErr != nil {
-				r.conn.SendMsg(&Packet{Type: PACKET_ERR, Data: []byte(retErr.Error())})
+				r.conn.SendMsg(&types.Packet{Type: types.PACKET_ERR, Data: []byte(retErr.Error())})
 			}
 		}()
 		destWalker := emptyWalker
 		if !r.merge {
-			destWalker = GetWalkerFn(r.dest)
+			destWalker = getWalkerFn(r.dest)
 		}
-		err := doubleWalkDiff(ctx, dw.HandleChange, destWalker, w.fill)
+		err := doubleWalkDiff(ctx, dw.HandleChange, destWalker, w.fill, r.filter, r.differ)
 		if err != nil {
 			return err
 		}
 		if err := dw.Wait(ctx); err != nil {
 			return err
 		}
-		r.conn.SendMsg(&Packet{Type: PACKET_FIN})
+		r.conn.SendMsg(&types.Packet{Type: types.PACKET_FIN})
 		return nil
 	})
 
@@ -146,9 +195,9 @@ func (r *receiver) run(ctx context.Context) error {
 				r.progressCb(size, true)
 			}()
 		}
-		var p Packet
+		var p types.Packet
 		for {
-			p = Packet{Data: p.Data[:0]}
+			p.ResetVT()
 			if err := r.conn.RecvMsg(&p); err != nil {
 				return err
 			}
@@ -158,35 +207,48 @@ func (r *receiver) run(ctx context.Context) error {
 			}
 
 			switch p.Type {
-			case PACKET_STAT:
+			case types.PACKET_ERR:
+				return errors.Errorf("error from sender: %s", p.Data)
+			case types.PACKET_STAT:
 				if p.Stat == nil {
 					if err := w.update(nil); err != nil {
 						return err
 					}
 					break
 				}
+
+				// normalize unix wire-specific paths to platform-specific paths
+				path := filepath.FromSlash(p.Stat.Path)
+				if filepath.ToSlash(path) != p.Stat.Path {
+					// e.g. a linux path foo/bar\baz cannot be represented on windows
+					return errors.WithStack(&os.PathError{Path: p.Stat.Path, Err: syscall.EINVAL, Op: "unrepresentable path"})
+				}
+				p.Stat.Path = path
+				p.Stat.Linkname = filepath.FromSlash(p.Stat.Linkname)
+
 				if fileCanRequestData(os.FileMode(p.Stat.Mode)) {
 					r.mu.Lock()
 					r.files[p.Stat.Path] = i
 					r.mu.Unlock()
 				}
 				i++
-				cp := &currentPath{path: p.Stat.Path, f: &StatInfo{p.Stat}}
-				if err := r.orderValidator.HandleChange(ChangeKindAdd, cp.path, cp.f, nil); err != nil {
+
+				cp := &currentPath{path: path, stat: p.Stat}
+				if err := r.orderValidator.HandleChange(ChangeKindAdd, cp.path, &StatInfo{cp.stat}, nil); err != nil {
 					return err
 				}
-				if err := r.hlValidator.HandleChange(ChangeKindAdd, cp.path, cp.f, nil); err != nil {
+				if err := r.hlValidator.HandleChange(ChangeKindAdd, cp.path, &StatInfo{cp.stat}, nil); err != nil {
 					return err
 				}
 				if err := w.update(cp); err != nil {
 					return err
 				}
-			case PACKET_DATA:
+			case types.PACKET_DATA:
 				r.muPipes.Lock()
 				pw, ok := r.pipes[p.ID]
 				r.muPipes.Unlock()
 				if !ok {
-					return errors.Errorf("invalid file request %s", p.ID)
+					return errors.Errorf("invalid file request %d", p.ID)
 				}
 				if len(p.Data) == 0 {
 					if err := pw.Close(); err != nil {
@@ -197,8 +259,16 @@ func (r *receiver) run(ctx context.Context) error {
 						return err
 					}
 				}
-			case PACKET_FIN:
-				return nil
+			case types.PACKET_FIN:
+				for {
+					var p types.Packet
+					if err := r.conn.RecvMsg(&p); err != nil {
+						if err == io.EOF {
+							return nil
+						}
+						return err
+					}
+				}
 			}
 		}
 	})
@@ -219,7 +289,7 @@ func (r *receiver) asyncDataFunc(ctx context.Context, p string, wc io.WriteClose
 	r.muPipes.Lock()
 	r.pipes[id] = wwc
 	r.muPipes.Unlock()
-	if err := r.conn.SendMsg(&Packet{Type: PACKET_REQ, ID: id}); err != nil {
+	if err := r.conn.SendMsg(&types.Packet{Type: types.PACKET_REQ, ID: id}); err != nil {
 		return err
 	}
 	err := wwc.Wait(ctx)

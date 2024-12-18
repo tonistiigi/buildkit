@@ -1,29 +1,30 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package archive
 
 import (
+	"archive/tar"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 
-	"github.com/containerd/containerd/sys"
-	"github.com/dmcgowan/go-tar"
+	"github.com/moby/sys/sequential"
 )
-
-// tarName returns platform-specific filepath
-// to canonical posix-style path for tar archival. p is relative
-// path.
-func tarName(p string) (string, error) {
-	// windows: convert windows style relative path with backslashes
-	// into forward slashes. Since windows does not allow '/' or '\'
-	// in file names, it is mostly safe to replace however we must
-	// check just in case
-	if strings.Contains(p, "/") {
-		return "", fmt.Errorf("Windows path contains forward slash: %s", p)
-	}
-
-	return strings.Replace(p, string(os.PathSeparator), "/", -1), nil
-}
 
 // chmodTarEntry is used to adjust the file permissions used in tar header based
 // on the platform the archival is done.
@@ -41,19 +42,15 @@ func setHeaderForSpecialDevice(*tar.Header, string, os.FileInfo) error {
 }
 
 func open(p string) (*os.File, error) {
-	// We use sys.OpenSequential to ensure we use sequential file
-	// access on Windows to avoid depleting the standby list.
-	return sys.OpenSequential(p)
+	// We use sequential file access to avoid depleting the standby list on
+	// Windows.
+	return sequential.Open(p)
 }
 
 func openFile(name string, flag int, perm os.FileMode) (*os.File, error) {
-	// Source is regular file. We use sys.OpenFileSequential to use sequential
-	// file access to avoid depleting the standby list on Windows.
-	return sys.OpenFileSequential(name, flag, perm)
-}
-
-func mkdirAll(path string, perm os.FileMode) error {
-	return sys.MkdirAll(path, perm)
+	// Source is regular file. We use sequential file access to avoid depleting
+	// the standby list on Windows.
+	return sequential.OpenFile(name, flag, perm)
 }
 
 func mkdir(path string, perm os.FileMode) error {
@@ -75,11 +72,7 @@ func skipFile(hdr *tar.Header) bool {
 	// specific or Linux-specific, this warning should be changed to an error
 	// to cater for the situation where someone does manage to upload a Linux
 	// image but have it tagged as Windows inadvertently.
-	if strings.Contains(hdr.Name, ":") {
-		return true
-	}
-
-	return false
+	return strings.Contains(hdr.Name, ":")
 }
 
 // handleTarTypeBlockCharFifo is an OS-specific helper function used by
@@ -88,7 +81,7 @@ func handleTarTypeBlockCharFifo(hdr *tar.Header, path string) error {
 	return nil
 }
 
-func handleLChmod(hdr *tar.Header, path string, hdrInfo os.FileInfo) error {
+func lchmod(path string, mode os.FileMode) error {
 	return nil
 }
 
@@ -100,4 +93,15 @@ func setxattr(path, key, value string) error {
 	// Return not support error, do not wrap underlying not supported
 	// since xattrs should not exist in windows diff archives
 	return errors.New("xattrs not supported on Windows")
+}
+
+func copyDirInfo(fi os.FileInfo, path string) error {
+	if err := os.Chmod(path, fi.Mode()); err != nil {
+		return fmt.Errorf("failed to chmod %s: %w", path, err)
+	}
+	return nil
+}
+
+func copyUpXAttrs(dst, src string) error {
+	return nil
 }

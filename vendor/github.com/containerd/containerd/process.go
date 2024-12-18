@@ -1,7 +1,24 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package containerd
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"syscall"
 	"time"
@@ -9,11 +26,13 @@ import (
 	"github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/pkg/errors"
+	"github.com/containerd/containerd/protobuf"
 )
 
 // Process represents a system process
 type Process interface {
+	// ID of the process
+	ID() string
 	// Pid is the system specific process id
 	Pid() uint32
 	// Start starts the process executing the user's defined binary
@@ -26,7 +45,7 @@ type Process interface {
 	Wait(context.Context) (<-chan ExitStatus, error)
 	// CloseIO allows various pipes to be closed on the process
 	CloseIO(context.Context, ...IOCloserOpts) error
-	// Resize changes the width and heigh of the process's terminal
+	// Resize changes the width and height of the process's terminal
 	Resize(ctx context.Context, w, h uint32) error
 	// IO returns the io set for the process
 	IO() cio.IO
@@ -34,7 +53,16 @@ type Process interface {
 	Status(context.Context) (Status, error)
 }
 
-// ExitStatus encapsulates a process' exit status.
+// NewExitStatus populates an ExitStatus
+func NewExitStatus(code uint32, t time.Time, err error) *ExitStatus {
+	return &ExitStatus{
+		code:     code,
+		exitedAt: t,
+		err:      err,
+	}
+}
+
+// ExitStatus encapsulates a process's exit status.
 // It is used by `Wait()` to return either a process exit code or an error
 type ExitStatus struct {
 	code     uint32
@@ -44,8 +72,10 @@ type ExitStatus struct {
 
 // Result returns the exit code and time of the exit status.
 // An error may be returned here to which indicates there was an error
-//   at some point while waiting for the exit status. It does not signify
-//   an error with the process itself.
+//
+//	at some point while waiting for the exit status. It does not signify
+//	an error with the process itself.
+//
 // If an error is returned, the process may still be running.
 func (s ExitStatus) Result() (uint32, time.Time, error) {
 	return s.code, s.exitedAt, s.err
@@ -63,7 +93,7 @@ func (s ExitStatus) ExitTime() time.Time {
 	return s.exitedAt
 }
 
-// Error returns the error, if any, that occured while waiting for the
+// Error returns the error, if any, that occurred while waiting for the
 // process.
 func (s ExitStatus) Error() error {
 	return s.err
@@ -93,9 +123,11 @@ func (p *process) Start(ctx context.Context) error {
 		ExecID:      p.id,
 	})
 	if err != nil {
-		p.io.Cancel()
-		p.io.Wait()
-		p.io.Close()
+		if p.io != nil {
+			p.io.Cancel()
+			p.io.Wait()
+			p.io.Close()
+		}
 		return errdefs.FromGRPC(err)
 	}
 	p.pid = r.Pid
@@ -135,7 +167,7 @@ func (p *process) Wait(ctx context.Context) (<-chan ExitStatus, error) {
 		}
 		c <- ExitStatus{
 			code:     r.ExitStatus,
-			exitedAt: r.ExitedAt,
+			exitedAt: protobuf.FromTimestamp(r.ExitedAt),
 		}
 	}()
 	return c, nil
@@ -181,7 +213,7 @@ func (p *process) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitS
 	}
 	switch status.Status {
 	case Running, Paused, Pausing:
-		return nil, errors.Wrapf(errdefs.ErrFailedPrecondition, "process must be stopped before deletion")
+		return nil, fmt.Errorf("current process state: %s, process must be stopped before deletion: %w", status.Status, errdefs.ErrFailedPrecondition)
 	}
 	r, err := p.task.client.TaskService().DeleteProcess(ctx, &tasks.DeleteProcessRequest{
 		ContainerID: p.task.id,
@@ -191,10 +223,11 @@ func (p *process) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitS
 		return nil, errdefs.FromGRPC(err)
 	}
 	if p.io != nil {
+		p.io.Cancel()
 		p.io.Wait()
 		p.io.Close()
 	}
-	return &ExitStatus{code: r.ExitStatus, exitedAt: r.ExitedAt}, nil
+	return &ExitStatus{code: r.ExitStatus, exitedAt: protobuf.FromTimestamp(r.ExitedAt)}, nil
 }
 
 func (p *process) Status(ctx context.Context) (Status, error) {

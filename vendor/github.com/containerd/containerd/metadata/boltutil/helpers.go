@@ -1,22 +1,54 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package boltutil
 
 import (
+	"fmt"
 	"time"
 
-	"github.com/boltdb/bolt"
-	"github.com/pkg/errors"
+	"github.com/containerd/containerd/protobuf"
+	"github.com/containerd/containerd/protobuf/proto"
+	"github.com/containerd/containerd/protobuf/types"
+	"github.com/containerd/typeurl/v2"
+	bolt "go.etcd.io/bbolt"
 )
 
 var (
-	bucketKeyLabels    = []byte("labels")
-	bucketKeyCreatedAt = []byte("createdat")
-	bucketKeyUpdatedAt = []byte("updatedat")
+	bucketKeyAnnotations = []byte("annotations")
+	bucketKeyLabels      = []byte("labels")
+	bucketKeyCreatedAt   = []byte("createdat")
+	bucketKeyUpdatedAt   = []byte("updatedat")
+	bucketKeyExtensions  = []byte("extensions")
 )
 
 // ReadLabels reads the labels key from the bucket
 // Uses the key "labels"
 func ReadLabels(bkt *bolt.Bucket) (map[string]string, error) {
-	lbkt := bkt.Bucket(bucketKeyLabels)
+	return readMap(bkt, bucketKeyLabels)
+}
+
+// ReadAnnotations reads the OCI Descriptor Annotations key from the bucket
+// Uses the key "annotations"
+func ReadAnnotations(bkt *bolt.Bucket) (map[string]string, error) {
+	return readMap(bkt, bucketKeyAnnotations)
+}
+
+func readMap(bkt *bolt.Bucket, bucketName []byte) (map[string]string, error) {
+	lbkt := bkt.Bucket(bucketName)
 	if lbkt == nil {
 		return nil, nil
 	}
@@ -37,9 +69,18 @@ func ReadLabels(bkt *bolt.Bucket) (map[string]string, error) {
 // bucket. Typically, this removes zero-value entries.
 // Uses the key "labels"
 func WriteLabels(bkt *bolt.Bucket, labels map[string]string) error {
+	return writeMap(bkt, bucketKeyLabels, labels)
+}
+
+// WriteAnnotations writes the OCI Descriptor Annotations
+func WriteAnnotations(bkt *bolt.Bucket, labels map[string]string) error {
+	return writeMap(bkt, bucketKeyAnnotations, labels)
+}
+
+func writeMap(bkt *bolt.Bucket, bucketName []byte, labels map[string]string) error {
 	// Remove existing labels to keep from merging
-	if lbkt := bkt.Bucket(bucketKeyLabels); lbkt != nil {
-		if err := bkt.DeleteBucket(bucketKeyLabels); err != nil {
+	if lbkt := bkt.Bucket(bucketName); lbkt != nil {
+		if err := bkt.DeleteBucket(bucketName); err != nil {
 			return err
 		}
 	}
@@ -48,7 +89,7 @@ func WriteLabels(bkt *bolt.Bucket, labels map[string]string) error {
 		return nil
 	}
 
-	lbkt, err := bkt.CreateBucket(bucketKeyLabels)
+	lbkt, err := bkt.CreateBucket(bucketName)
 	if err != nil {
 		return err
 	}
@@ -60,7 +101,7 @@ func WriteLabels(bkt *bolt.Bucket, labels map[string]string) error {
 		}
 
 		if err := lbkt.Put([]byte(k), []byte(v)); err != nil {
-			return errors.Wrapf(err, "failed to set label %q=%q", k, v)
+			return fmt.Errorf("failed to set label %q=%q: %w", k, v, err)
 		}
 	}
 
@@ -108,4 +149,91 @@ func WriteTimestamps(bkt *bolt.Bucket, created, updated time.Time) error {
 	}
 
 	return nil
+}
+
+// WriteExtensions will write a KV map to the given bucket,
+// where `K` is a string key and `V` is a protobuf's Any type that represents a generic extension.
+func WriteExtensions(bkt *bolt.Bucket, extensions map[string]typeurl.Any) error {
+	if len(extensions) == 0 {
+		return nil
+	}
+
+	ebkt, err := bkt.CreateBucketIfNotExists(bucketKeyExtensions)
+	if err != nil {
+		return err
+	}
+
+	for name, ext := range extensions {
+		ext := protobuf.FromAny(ext)
+		p, err := proto.Marshal(ext)
+		if err != nil {
+			return err
+		}
+
+		if err := ebkt.Put([]byte(name), p); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ReadExtensions will read back a map of extensions from the given bucket, previously written by WriteExtensions
+func ReadExtensions(bkt *bolt.Bucket) (map[string]typeurl.Any, error) {
+	var (
+		extensions = make(map[string]typeurl.Any)
+		ebkt       = bkt.Bucket(bucketKeyExtensions)
+	)
+
+	if ebkt == nil {
+		return extensions, nil
+	}
+
+	if err := ebkt.ForEach(func(k, v []byte) error {
+		var t types.Any
+		if err := proto.Unmarshal(v, &t); err != nil {
+			return err
+		}
+
+		extensions[string(k)] = &t
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return extensions, nil
+}
+
+// WriteAny write a protobuf's Any type to the bucket
+func WriteAny(bkt *bolt.Bucket, name []byte, any typeurl.Any) error {
+	pbany := protobuf.FromAny(any)
+	if pbany == nil {
+		return nil
+	}
+
+	data, err := proto.Marshal(pbany)
+	if err != nil {
+		return fmt.Errorf("failed to marshal: %w", err)
+	}
+
+	if err := bkt.Put(name, data); err != nil {
+		return fmt.Errorf("put failed: %w", err)
+	}
+
+	return nil
+}
+
+// ReadAny reads back protobuf's Any type from the bucket
+func ReadAny(bkt *bolt.Bucket, name []byte) (*types.Any, error) {
+	bytes := bkt.Get(name)
+	if bytes == nil {
+		return nil, nil
+	}
+
+	out := types.Any{}
+	if err := proto.Unmarshal(bytes, &out); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal any: %w", err)
+	}
+
+	return &out, nil
 }

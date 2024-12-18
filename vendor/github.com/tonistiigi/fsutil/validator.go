@@ -2,10 +2,10 @@ package fsutil
 
 import (
 	"os"
-	"path"
-	"runtime"
+	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/pkg/errors"
 )
@@ -27,22 +27,19 @@ func (v *Validator) HandleChange(kind ChangeKind, p string, fi os.FileInfo, err 
 	if v.parentDirs == nil {
 		v.parentDirs = make([]parent, 1, 10)
 	}
-	if runtime.GOOS == "windows" {
-		p = strings.Replace(p, "\\", "", -1)
+	if p != filepath.Clean(p) {
+		return errors.WithStack(&os.PathError{Path: p, Err: syscall.EINVAL, Op: "unclean path"})
 	}
-	if p != path.Clean(p) {
-		return errors.Errorf("invalid unclean path %s", p)
+	if filepath.IsAbs(p) {
+		return errors.WithStack(&os.PathError{Path: p, Err: syscall.EINVAL, Op: "absolute path"})
 	}
-	if path.IsAbs(p) {
-		return errors.Errorf("abolute path %s not allowed", p)
-	}
-	dir := path.Dir(p)
-	base := path.Base(p)
+	dir := filepath.Dir(p)
+	base := filepath.Base(p)
 	if dir == "." {
 		dir = ""
 	}
-	if dir == ".." || strings.HasPrefix(p, "../") {
-		return errors.Errorf("invalid path: %s", p)
+	if dir == ".." || strings.HasPrefix(p, filepath.FromSlash("../")) {
+		return errors.WithStack(&os.PathError{Path: p, Err: syscall.EINVAL, Op: "escape check"})
 	}
 
 	// find a parent dir from saved records
@@ -55,12 +52,12 @@ func (v *Validator) HandleChange(kind ChangeKind, p string, fi os.FileInfo, err 
 	}
 
 	if dir != v.parentDirs[len(v.parentDirs)-1].dir || v.parentDirs[i].last >= base {
-		return errors.Errorf("changes out of order: %q %q", p, path.Join(v.parentDirs[i].dir, v.parentDirs[i].last))
+		return errors.Errorf("changes out of order: %q %q", p, filepath.Join(v.parentDirs[i].dir, v.parentDirs[i].last))
 	}
 	v.parentDirs[i].last = base
 	if kind != ChangeKindDelete && fi.IsDir() {
 		v.parentDirs = append(v.parentDirs, parent{
-			dir:  path.Join(dir, base),
+			dir:  filepath.Join(dir, base),
 			last: "",
 		})
 	}
@@ -75,7 +72,7 @@ func ComparePath(p1, p2 string) int {
 		switch {
 		case p1[i] == p2[i]:
 			continue
-		case p2[i] != '/' && p1[i] < p2[i] || p1[i] == '/':
+		case p2[i] != filepath.Separator && p1[i] < p2[i] || p1[i] == filepath.Separator:
 			return -1
 		default:
 			return 1

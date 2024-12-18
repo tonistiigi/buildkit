@@ -1,14 +1,15 @@
 package debug
 
 import (
-	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/boltdb/bolt"
 	"github.com/moby/buildkit/util/appdefaults"
+	"github.com/pkg/errors"
 	"github.com/urfave/cli"
+	bolt "go.etcd.io/bbolt"
 )
 
 var DumpMetadataCommand = cli.Command{
@@ -22,11 +23,41 @@ var DumpMetadataCommand = cli.Command{
 		},
 	},
 	Action: func(clicontext *cli.Context) error {
-		dbFile := filepath.Join(clicontext.String("root"), "metadata.db")
-		return dumpBolt(dbFile, func(k, v []byte) string {
-			return fmt.Sprintf("%q: %s", string(k), string(v))
-		})
+		dbFiles, err := findMetadataDBFiles(clicontext.String("root"))
+		if err != nil {
+			return err
+		}
+		for _, dbFile := range dbFiles {
+			fmt.Printf("===== %s =====\n", dbFile)
+			if err := dumpBolt(dbFile, func(k, v []byte) string {
+				return fmt.Sprintf("%q: %s", string(k), string(v))
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
 	},
+}
+
+func findMetadataDBFiles(root string) ([]string, error) {
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, dir := range dirs {
+		if !dir.IsDir() {
+			continue
+		}
+		p := filepath.Join(root, dir.Name(), "metadata_v2.db")
+		_, err := os.Stat(p)
+		if err == nil {
+			files = append(files, p)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return files, nil
 }
 
 func dumpBolt(dbFile string, stringifier func(k, v []byte) string) error {

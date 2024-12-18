@@ -1,6 +1,7 @@
 package llbbuild
 
 import (
+	"context"
 	"testing"
 
 	"github.com/moby/buildkit/client/llb"
@@ -10,24 +11,27 @@ import (
 )
 
 func TestMarshal(t *testing.T) {
+	t.Parallel()
 	b := NewBuildOp(newDummyOutput("foobar"), WithFilename("myfilename"))
-	dt, opMeta, err := b.Marshal()
+	dgst, dt, opMeta, _, err := b.Marshal(context.TODO(), &llb.Constraints{})
 	_ = opMeta
 	require.NoError(t, err)
+
+	require.Equal(t, dgst, digest.FromBytes(dt))
 
 	var op pb.Op
 	err = op.Unmarshal(dt)
 	require.NoError(t, err)
 
 	buildop := op.GetBuild()
-	require.NotEqual(t, buildop, nil)
+	require.NotNil(t, buildop)
 
-	require.Equal(t, len(op.Inputs), 1)
-	require.Equal(t, buildop.Builder, pb.LLBBuilder)
-	require.Equal(t, len(buildop.Inputs), 1)
-	require.Equal(t, buildop.Inputs[pb.LLBDefinitionInput], &pb.BuildInput{pb.InputIndex(0)})
+	require.Equal(t, 1, len(op.Inputs))
+	require.Equal(t, pb.LLBBuilder, pb.InputIndex(buildop.Builder))
+	require.Equal(t, 1, len(buildop.Inputs))
+	require.Equal(t, &pb.BuildInput{Input: 0}, buildop.Inputs[string(pb.LLBDefinitionInput)])
 
-	require.Equal(t, buildop.Attrs[pb.AttrLLBDefinitionFilename], "myfilename")
+	require.Equal(t, "myfilename", buildop.Attrs[pb.AttrLLBDefinitionFilename])
 }
 
 func newDummyOutput(key string) llb.Output {
@@ -39,12 +43,13 @@ type dummyOutput struct {
 	dgst digest.Digest
 }
 
-func (d *dummyOutput) ToInput() (*pb.Input, error) {
+func (d *dummyOutput) ToInput(context.Context, *llb.Constraints) (*pb.Input, error) {
 	return &pb.Input{
-		Digest: d.dgst,
-		Index:  pb.OutputIndex(7), // random constant
+		Digest: string(d.dgst),
+		Index:  7, // random constant
 	}, nil
 }
-func (d *dummyOutput) Vertex() llb.Vertex {
+
+func (d *dummyOutput) Vertex(context.Context, *llb.Constraints) llb.Vertex {
 	return nil
 }

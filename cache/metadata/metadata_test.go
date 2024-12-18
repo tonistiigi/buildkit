@@ -1,19 +1,18 @@
 package metadata
 
 import (
-	"io/ioutil"
-	"os"
+	"context"
 	"path/filepath"
 	"testing"
 
-	"github.com/boltdb/bolt"
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestGetSetSearch(t *testing.T) {
-	tmpdir, err := ioutil.TempDir("", "buildkit-storage")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpdir)
+	t.Parallel()
+
+	tmpdir := t.TempDir()
 
 	dbPath := filepath.Join(tmpdir, "storage.db")
 
@@ -108,9 +107,9 @@ func TestGetSetSearch(t *testing.T) {
 }
 
 func TestIndexes(t *testing.T) {
-	tmpdir, err := ioutil.TempDir("", "buildkit-storage")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpdir)
+	t.Parallel()
+
+	tmpdir := t.TempDir()
 
 	dbPath := filepath.Join(tmpdir, "storage.db")
 
@@ -142,33 +141,34 @@ func TestIndexes(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	sis, err := s.Search("tag:baz")
+	ctx := context.Background()
+	sis, err := s.Search(ctx, "tag:baz", false)
 	require.NoError(t, err)
 	require.Equal(t, 2, len(sis))
 
-	require.Equal(t, sis[0].ID(), "foo1")
-	require.Equal(t, sis[1].ID(), "foo3")
+	require.Equal(t, "foo1", sis[0].ID())
+	require.Equal(t, "foo3", sis[1].ID())
 
-	sis, err = s.Search("tag:bax")
+	sis, err = s.Search(ctx, "tag:bax", false)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(sis))
 
-	require.Equal(t, sis[0].ID(), "foo2")
+	require.Equal(t, "foo2", sis[0].ID())
 
 	err = s.Clear("foo1")
 	require.NoError(t, err)
 
-	sis, err = s.Search("tag:baz")
+	sis, err = s.Search(ctx, "tag:baz", false)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(sis))
 
-	require.Equal(t, sis[0].ID(), "foo3")
+	require.Equal(t, "foo3", sis[0].ID())
 }
 
 func TestExternalData(t *testing.T) {
-	tmpdir, err := ioutil.TempDir("", "buildkit-storage")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpdir)
+	t.Parallel()
+
+	tmpdir := t.TempDir()
 
 	dbPath := filepath.Join(tmpdir, "storage.db")
 

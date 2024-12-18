@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -9,23 +10,23 @@ import (
 )
 
 type buildOpt struct {
-	target     string
-	containerd string
-	runc       string
-	buildkit   string
+	buildkit       string
+	containerd     string
+	runc           string
+	withContainerd bool
 }
 
 func main() {
 	var opt buildOpt
-	flag.StringVar(&opt.target, "target", "containerd", "target (standalone, containerd)")
-	flag.StringVar(&opt.containerd, "containerd", "4af5f657526a8aa5eedef734f5f29152031b1d3a", "containerd version")
-	flag.StringVar(&opt.runc, "runc", "74a17296470088de3805e138d3d87c62e613dfc4", "runc version")
+	flag.BoolVar(&opt.withContainerd, "with-containerd", true, "enable containerd worker")
+	flag.StringVar(&opt.containerd, "containerd", "v1.7.2", "containerd version")
+	flag.StringVar(&opt.runc, "runc", "v1.1.7", "runc version")
 	flag.StringVar(&opt.buildkit, "buildkit", "master", "buildkit version")
 	flag.Parse()
 
 	bk := buildkit(opt)
 	out := bk
-	dt, err := out.Marshal()
+	dt, err := out.Marshal(context.TODO(), llb.LinuxAmd64)
 	if err != nil {
 		panic(err)
 	}
@@ -33,11 +34,11 @@ func main() {
 }
 
 func goBuildBase() llb.State {
-	goAlpine := llb.Image("docker.io/library/golang:1.9-alpine")
+	goAlpine := llb.Image("docker.io/library/golang:1.23-alpine")
 	return goAlpine.
-		AddEnv("PATH", "/usr/local/go/bin:"+system.DefaultPathEnv).
+		AddEnv("PATH", "/usr/local/go/bin:"+system.DefaultPathEnvUnix).
 		AddEnv("GOPATH", "/go").
-		Run(llb.Shlex("apk add --no-cache g++ linux-headers make")).Root()
+		Run(llb.Shlex("apk add --no-cache g++ linux-headers libseccomp-dev make")).Root()
 }
 
 func goRepo(s llb.State, repo string, src llb.State) func(ro ...llb.RunOption) llb.State {
@@ -82,23 +83,22 @@ func buildkit(opt buildOpt) llb.State {
 	}
 	run := goRepo(goBuildBase(), repo, src)
 
-	builddStandalone := run(llb.Shlex("go build -o /out/buildd-standalone -tags standalone ./cmd/buildd"))
-
-	builddContainerd := run(llb.Shlex("go build -o /out/buildd-containerd -tags containerd ./cmd/buildd"))
+	buildkitd := run(llb.Shlex("go build -o /out/buildkitd ./cmd/buildkitd"))
 
 	buildctl := run(llb.Shlex("go build -o /out/buildctl ./cmd/buildctl"))
 
 	r := llb.Scratch().With(
 		copyAll(buildctl, "/"),
+		copyAll(buildkitd, "/"),
 		copyAll(runc(opt.runc), "/"),
 	)
 
-	if opt.target == "containerd" {
-		return r.With(
+	if opt.withContainerd {
+		r = r.With(
 			copyAll(containerd(opt.containerd), "/"),
-			copyAll(builddContainerd, "/"))
+		)
 	}
-	return r.With(copyAll(builddStandalone, "/"))
+	return r
 }
 
 func copyAll(src llb.State, destPath string) llb.StateOption {
@@ -112,10 +112,11 @@ func copyFrom(src llb.State, srcPath, destPath string) llb.StateOption {
 	}
 }
 
-// copy copies files between 2 states using cp until there is no copyOp
+// copy copies files between 2 states using cp
 func copy(src llb.State, srcPath string, dest llb.State, destPath string) llb.State {
-	cpImage := llb.Image("docker.io/library/alpine:latest@sha256:1072e499f3f655a032e88542330cf75b02e7bdf673278f701d7ba61629ee3ebe")
-	cp := cpImage.Run(llb.Shlexf("cp -a /src%s /dest%s", srcPath, destPath))
-	cp.AddMount("/src", src, llb.Readonly)
-	return cp.AddMount("/dest", dest)
+	return dest.File(llb.Copy(src, srcPath, destPath, &llb.CopyInfo{
+		AllowWildcard:  true,
+		AttemptUnpack:  true,
+		CreateDestPath: true,
+	}))
 }

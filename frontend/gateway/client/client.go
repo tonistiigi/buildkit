@@ -1,163 +1,165 @@
 package client
 
 import (
-	"encoding/json"
+	"context"
 	"io"
-	"net"
-	"os"
-	"strings"
-	"time"
+	"syscall"
 
-	pb "github.com/moby/buildkit/frontend/gateway/pb"
-	opspb "github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/client/llb"
+	"github.com/moby/buildkit/client/llb/sourceresolver"
+	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/solver/result"
+	spb "github.com/moby/buildkit/sourcepolicy/pb"
+	"github.com/moby/buildkit/util/apicaps"
 	digest "github.com/opencontainers/go-digest"
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
-	"google.golang.org/grpc"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
+	fstypes "github.com/tonistiigi/fsutil/types"
 )
 
-const frontendPrefix = "BUILDKIT_FRONTEND_OPT_"
+type Result = result.Result[Reference]
 
-func Current() (*Client, error) {
-	ctx, conn, err := grpcClientConn(context.Background())
-	if err != nil {
-		return nil, err
-	}
+type Attestation = result.Attestation[Reference]
 
-	c := pb.NewLLBBridgeClient(conn)
+type BuildFunc func(context.Context, Client) (*Result, error)
 
-	_, err = c.Ping(ctx, &pb.PingRequest{})
-	if err != nil {
-		return nil, err
-	}
-
-	return &Client{client: c, opts: opts(), sessionID: sessionID()}, nil
+func NewResult() *Result {
+	return &Result{}
 }
 
-type Client struct {
-	client    pb.LLBBridgeClient
-	opts      map[string]string
-	sessionID string
+type Client interface {
+	sourceresolver.MetaResolver
+	Solve(ctx context.Context, req SolveRequest) (*Result, error)
+	ResolveImageConfig(ctx context.Context, ref string, opt sourceresolver.Opt) (string, digest.Digest, []byte, error)
+	BuildOpts() BuildOpts
+	Inputs(ctx context.Context) (map[string]llb.State, error)
+	NewContainer(ctx context.Context, req NewContainerRequest) (Container, error)
+	Warn(ctx context.Context, dgst digest.Digest, msg string, opts WarnOpts) error
 }
 
-func (c *Client) Solve(ctx context.Context, def *opspb.Definition, frontend string, exporterAttr map[string][]byte, final bool) (*Reference, error) {
-	dt, err := json.Marshal(exporterAttr)
-	if err != nil {
-		return nil, err
-	}
-	req := &pb.SolveRequest{Definition: def, Frontend: frontend, Final: final, ExporterAttr: dt}
-	resp, err := c.client.Solve(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	return &Reference{id: resp.Ref, c: c}, nil
+// NewContainerRequest encapsulates the requirements for a client to define a
+// new container, without defining the initial process.
+type NewContainerRequest struct {
+	Mounts      []Mount
+	Hostname    string
+	NetMode     pb.NetMode
+	ExtraHosts  []*pb.HostIP
+	Platform    *pb.Platform
+	Constraints *pb.WorkerConstraints
 }
 
-func (c *Client) ResolveImageConfig(ctx context.Context, ref string) (digest.Digest, []byte, error) {
-	resp, err := c.client.ResolveImageConfig(ctx, &pb.ResolveImageConfigRequest{Ref: ref})
-	if err != nil {
-		return "", nil, err
-	}
-	return resp.Digest, resp.Config, nil
+// Mount allows clients to specify a filesystem mount. A Reference to a
+// previously solved Result is required.
+type Mount struct {
+	Selector  string
+	Dest      string
+	ResultID  string
+	Ref       Reference
+	Readonly  bool
+	MountType pb.MountType
+	CacheOpt  *pb.CacheOpt
+	SecretOpt *pb.SecretOpt
+	SSHOpt    *pb.SSHOpt
 }
 
-func (c *Client) Opts() map[string]string {
-	return c.opts
+// Container is used to start new processes inside a container and release the
+// container resources when done.
+type Container interface {
+	Start(context.Context, StartRequest) (ContainerProcess, error)
+	Release(context.Context) error
 }
 
-func (c *Client) SessionID() string {
-	return c.sessionID
+// StartRequest encapsulates the arguments to define a process within a
+// container.
+type StartRequest struct {
+	Args           []string
+	Env            []string
+	SecretEnv      []*pb.SecretEnv
+	User           string
+	Cwd            string
+	Tty            bool
+	Stdin          io.ReadCloser
+	Stdout, Stderr io.WriteCloser
+	SecurityMode   pb.SecurityMode
+
+	RemoveMountStubsRecursive bool
 }
 
-type Reference struct {
-	id string
-	c  *Client
+// WinSize is same as executor.WinSize, copied here to prevent circular package
+// dependencies.
+type WinSize struct {
+	Rows uint32
+	Cols uint32
 }
 
-func (r *Reference) ReadFile(ctx context.Context, fp string) ([]byte, error) {
-	resp, err := r.c.client.ReadFile(ctx, &pb.ReadFileRequest{FilePath: fp, Ref: r.id})
-	if err != nil {
-		return nil, err
-	}
-	return resp.Data, nil
+// ContainerProcess represents a process within a container.
+type ContainerProcess interface {
+	Wait() error
+	Resize(ctx context.Context, size WinSize) error
+	Signal(ctx context.Context, sig syscall.Signal) error
 }
 
-func grpcClientConn(ctx context.Context) (context.Context, *grpc.ClientConn, error) {
-	dialOpt := grpc.WithDialer(func(addr string, d time.Duration) (net.Conn, error) {
-		return stdioConn(), nil
-	})
-
-	cc, err := grpc.DialContext(ctx, "", dialOpt, grpc.WithInsecure())
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to create grpc client")
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	_ = cancel
-	// go monitorHealth(ctx, cc, cancel)
-
-	return ctx, cc, nil
+type Reference interface {
+	ToState() (llb.State, error)
+	Evaluate(ctx context.Context) error
+	ReadFile(ctx context.Context, req ReadRequest) ([]byte, error)
+	StatFile(ctx context.Context, req StatRequest) (*fstypes.Stat, error)
+	ReadDir(ctx context.Context, req ReadDirRequest) ([]*fstypes.Stat, error)
 }
 
-func stdioConn() net.Conn {
-	return &conn{os.Stdin, os.Stdout, os.Stdout}
+type ReadRequest struct {
+	Filename string
+	Range    *FileRange
 }
 
-type conn struct {
-	io.Reader
-	io.Writer
-	io.Closer
+type FileRange struct {
+	Offset int
+	Length int
 }
 
-func (s *conn) LocalAddr() net.Addr {
-	return dummyAddr{}
-}
-func (s *conn) RemoteAddr() net.Addr {
-	return dummyAddr{}
-}
-func (s *conn) SetDeadline(t time.Time) error {
-	return nil
-}
-func (s *conn) SetReadDeadline(t time.Time) error {
-	return nil
-}
-func (s *conn) SetWriteDeadline(t time.Time) error {
-	return nil
+type ReadDirRequest struct {
+	Path           string
+	IncludePattern string
 }
 
-type dummyAddr struct {
+type StatRequest struct {
+	Path string
 }
 
-func (d dummyAddr) Network() string {
-	return "pipe"
+// SolveRequest is same as frontend.SolveRequest but avoiding dependency
+type SolveRequest struct {
+	Evaluate       bool
+	Definition     *pb.Definition
+	Frontend       string
+	FrontendOpt    map[string]string
+	FrontendInputs map[string]*pb.Definition
+	CacheImports   []CacheOptionsEntry
+	SourcePolicies []*spb.Policy
 }
 
-func (d dummyAddr) String() string {
-	return "localhost"
+type CacheOptionsEntry struct {
+	Type  string
+	Attrs map[string]string
 }
 
-func opts() map[string]string {
-	opts := map[string]string{}
-	for _, env := range os.Environ() {
-		parts := strings.SplitN(env, "=", 2)
-		k := parts[0]
-		v := ""
-		if len(parts) == 2 {
-			v = parts[1]
-		}
-		if !strings.HasPrefix(k, frontendPrefix) {
-			continue
-		}
-		parts = strings.SplitN(v, "=", 2)
-		v = ""
-		if len(parts) == 2 {
-			v = parts[1]
-		}
-		opts[parts[0]] = v
-	}
-	return opts
+type WorkerInfo struct {
+	ID        string
+	Labels    map[string]string
+	Platforms []ocispecs.Platform
 }
 
-func sessionID() string {
-	return os.Getenv("BUILDKIT_SESSION_ID")
+type BuildOpts struct {
+	Opts      map[string]string
+	SessionID string
+	Workers   []WorkerInfo
+	Product   string
+	LLBCaps   apicaps.CapSet
+	Caps      apicaps.CapSet
+}
+
+type WarnOpts struct {
+	Level      int
+	SourceInfo *pb.SourceInfo
+	Range      []*pb.Range
+	Detail     [][]byte
+	URL        string
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -9,22 +10,22 @@ import (
 )
 
 type buildOpt struct {
-	target     string
-	containerd string
-	runc       string
+	withContainerd bool
+	containerd     string
+	runc           string
 }
 
 func main() {
 	var opt buildOpt
-	flag.StringVar(&opt.target, "target", "containerd", "target (standalone, containerd)")
-	flag.StringVar(&opt.containerd, "containerd", "4af5f657526a8aa5eedef734f5f29152031b1d3a", "containerd version")
-	flag.StringVar(&opt.runc, "runc", "74a17296470088de3805e138d3d87c62e613dfc4", "runc version")
+	flag.BoolVar(&opt.withContainerd, "with-containerd", true, "enable containerd worker")
+	flag.StringVar(&opt.containerd, "containerd", "v1.7.2", "containerd version")
+	flag.StringVar(&opt.runc, "runc", "v1.1.7", "runc version")
 	flag.Parse()
 
 	bk := buildkit(opt)
 	out := bk.Run(llb.Shlex("ls -l /bin")) // debug output
 
-	dt, err := out.Marshal()
+	dt, err := out.Marshal(context.TODO(), llb.LinuxAmd64)
 	if err != nil {
 		panic(err)
 	}
@@ -32,12 +33,12 @@ func main() {
 }
 
 func goBuildBase() llb.State {
-	goAlpine := llb.Image("docker.io/library/golang:1.9-alpine")
+	goAlpine := llb.Image("docker.io/library/golang:1.23-alpine")
 	return goAlpine.
-		AddEnv("PATH", "/usr/local/go/bin:"+system.DefaultPathEnv).
+		AddEnv("PATH", "/usr/local/go/bin:"+system.DefaultPathEnvUnix).
 		AddEnv("GOPATH", "/go").
 		Run(llb.Shlex("apk add --no-cache g++ linux-headers")).
-		Run(llb.Shlex("apk add --no-cache git make")).Root()
+		Run(llb.Shlex("apk add --no-cache git libseccomp-dev make")).Root()
 }
 
 func runc(version string) llb.State {
@@ -62,11 +63,8 @@ func buildkit(opt buildOpt) llb.State {
 		Run(llb.Shlex("git clone https://github.com/moby/buildkit.git /go/src/github.com/moby/buildkit")).
 		Dir("/go/src/github.com/moby/buildkit")
 
-	builddStandalone := src.
-		Run(llb.Shlex("go build -o /bin/buildd-standalone -tags standalone ./cmd/buildd"))
-
-	builddContainerd := src.
-		Run(llb.Shlex("go build -o /bin/buildd-containerd -tags containerd ./cmd/buildd"))
+	buildkitd := src.
+		Run(llb.Shlex("go build -o /bin/buildkitd ./cmd/buildkitd"))
 
 	buildctl := src.
 		Run(llb.Shlex("go build -o /bin/buildctl ./cmd/buildctl"))
@@ -74,11 +72,9 @@ func buildkit(opt buildOpt) llb.State {
 	r := llb.Image("docker.io/library/alpine:latest")
 	r = copy(buildctl.Root(), "/bin/buildctl", r, "/bin/")
 	r = copy(runc(opt.runc), "/usr/bin/runc", r, "/bin/")
-	if opt.target == "containerd" {
+	r = copy(buildkitd.Root(), "/bin/buildkitd", r, "/bin/")
+	if opt.withContainerd {
 		r = copy(containerd(opt.containerd), "/go/src/github.com/containerd/containerd/bin/containerd", r, "/bin/")
-		r = copy(builddContainerd.Root(), "/bin/buildd-containerd", r, "/bin/")
-	} else {
-		r = copy(builddStandalone.Root(), "/bin/buildd-standalone", r, "/bin/")
 	}
 	return r
 }

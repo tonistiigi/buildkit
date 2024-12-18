@@ -1,8 +1,11 @@
 package llbbuild
 
 import (
+	"context"
+
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/util/apicaps"
 	digest "github.com/opencontainers/go-digest"
 )
 
@@ -17,42 +20,45 @@ func NewBuildOp(source llb.Output, opt ...BuildOption) llb.Vertex {
 	for _, o := range opt {
 		o(info)
 	}
-	return &build{source: source, info: info}
+	return &build{source: source, info: info, constraints: info.Constraints}
 }
 
 type build struct {
-	source           llb.Output
-	info             *BuildInfo
-	cachedPB         []byte
-	cachedOpMetadata *pb.OpMetadata
+	cache       llb.MarshalCache
+	source      llb.Output
+	info        *BuildInfo
+	constraints llb.Constraints
 }
 
-func (b *build) ToInput() (*pb.Input, error) {
-	dt, opMetadata, err := b.Marshal()
-	_ = opMetadata
+func (b *build) ToInput(ctx context.Context, c *llb.Constraints) (*pb.Input, error) {
+	dgst, _, _, _, err := b.Marshal(ctx, c)
 	if err != nil {
 		return nil, err
 	}
-	dgst := digest.FromBytes(dt)
-	return &pb.Input{Digest: dgst, Index: pb.OutputIndex(0)}, nil
+	return &pb.Input{Digest: string(dgst), Index: 0}, nil
 }
 
-func (b *build) Vertex() llb.Vertex {
+func (b *build) Vertex(context.Context, *llb.Constraints) llb.Vertex {
 	return b
 }
 
-func (b *build) Validate() error {
+func (b *build) Validate(context.Context, *llb.Constraints) error {
 	return nil
 }
 
-func (b *build) Marshal() ([]byte, *pb.OpMetadata, error) {
-	if b.cachedPB != nil {
-		return b.cachedPB, b.cachedOpMetadata, nil
+func (b *build) Marshal(ctx context.Context, c *llb.Constraints) (digest.Digest, []byte, *pb.OpMetadata, []*llb.SourceLocation, error) {
+	cache := b.cache.Acquire()
+	defer cache.Release()
+
+	if dgst, dt, md, srcs, err := cache.Load(c); err == nil {
+		return dgst, dt, md, srcs, nil
 	}
+
 	pbo := &pb.BuildOp{
-		Builder: pb.LLBBuilder,
+		Builder: int64(pb.LLBBuilder),
 		Inputs: map[string]*pb.BuildInput{
-			pb.LLBDefinitionInput: {pb.InputIndex(0)}},
+			pb.LLBDefinitionInput: {Input: 0},
+		},
 	}
 
 	pbo.Attrs = map[string]string{}
@@ -61,26 +67,28 @@ func (b *build) Marshal() ([]byte, *pb.OpMetadata, error) {
 		pbo.Attrs[pb.AttrLLBDefinitionFilename] = b.info.DefinitionFilename
 	}
 
-	pop := &pb.Op{
-		Op: &pb.Op_Build{
-			Build: pbo,
-		},
+	if b.constraints.Metadata.Caps == nil {
+		b.constraints.Metadata.Caps = make(map[apicaps.CapID]bool)
+	}
+	b.constraints.Metadata.Caps[pb.CapBuildOpLLBFileName] = true
+
+	pop, md := llb.MarshalConstraints(c, &b.constraints)
+	pop.Op = &pb.Op_Build{
+		Build: pbo,
 	}
 
-	inp, err := b.source.ToInput()
+	inp, err := b.source.ToInput(ctx, c)
 	if err != nil {
-		return nil, nil, err
+		return "", nil, nil, nil, err
 	}
 
 	pop.Inputs = append(pop.Inputs, inp)
 
 	dt, err := pop.Marshal()
 	if err != nil {
-		return nil, nil, err
+		return "", nil, nil, nil, err
 	}
-	b.cachedPB = dt
-	b.cachedOpMetadata = &pb.OpMetadata{}
-	return dt, b.cachedOpMetadata, nil
+	return cache.Store(dt, md, b.constraints.SourceLocations, c)
 }
 
 func (b *build) Output() llb.Output {
@@ -92,6 +100,7 @@ func (b *build) Inputs() []llb.Output {
 }
 
 type BuildInfo struct {
+	llb.Constraints
 	DefinitionFilename string
 }
 
@@ -100,5 +109,11 @@ type BuildOption func(*BuildInfo)
 func WithFilename(fn string) BuildOption {
 	return func(b *BuildInfo) {
 		b.DefinitionFilename = fn
+	}
+}
+
+func WithConstraints(co llb.ConstraintsOpt) BuildOption {
+	return func(b *BuildInfo) {
+		co.SetConstraintsOption(&b.Constraints)
 	}
 }

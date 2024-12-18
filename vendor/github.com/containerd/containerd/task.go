@@ -1,9 +1,26 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package containerd
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	goruntime "runtime"
@@ -19,14 +36,18 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/protobuf"
+	google_protobuf "github.com/containerd/containerd/protobuf/types"
 	"github.com/containerd/containerd/rootfs"
-	"github.com/containerd/typeurl"
-	google_protobuf "github.com/gogo/protobuf/types"
+	"github.com/containerd/containerd/runtime/linux/runctypes"
+	"github.com/containerd/containerd/runtime/v2/runc/options"
+	"github.com/containerd/typeurl/v2"
 	digest "github.com/opencontainers/go-digest"
-	"github.com/opencontainers/image-spec/specs-go/v1"
+	is "github.com/opencontainers/image-spec/specs-go"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/pkg/errors"
 )
 
 // UnknownExitStatus is returned when containerd is unable to
@@ -98,6 +119,13 @@ type CheckpointTaskInfo struct {
 	ParentCheckpoint digest.Digest
 	// Options hold runtime specific settings for checkpointing a task
 	Options interface{}
+
+	runtime string
+}
+
+// Runtime name for the container
+func (i *CheckpointTaskInfo) Runtime() string {
+	return i.runtime
 }
 
 // CheckpointTaskOpts allows the caller to set checkpoint options
@@ -112,6 +140,17 @@ type TaskInfo struct {
 	RootFS []mount.Mount
 	// Options hold runtime specific settings for task creation
 	Options interface{}
+	// RuntimePath is an absolute path that can be used to overwrite path
+	// to a shim runtime binary.
+	RuntimePath string
+
+	// runtime is the runtime name for the container, and cannot be changed.
+	runtime string
+}
+
+// Runtime name for the container
+func (i *TaskInfo) Runtime() string {
+	return i.runtime
 }
 
 // Task is the executable object within containerd
@@ -123,13 +162,15 @@ type Task interface {
 	// Resume the execution of the task
 	Resume(context.Context) error
 	// Exec creates a new process inside the task
-	Exec(context.Context, string, *specs.Process, cio.Creation) (Process, error)
+	Exec(context.Context, string, *specs.Process, cio.Creator) (Process, error)
 	// Pids returns a list of system specific process ids inside the task
 	Pids(context.Context) ([]ProcessInfo, error)
 	// Checkpoint serializes the runtime and memory information of a task into an
-	// OCI Index that can be push and pulled from a remote resource.
+	// OCI Index that can be pushed and pulled from a remote resource.
 	//
 	// Additional software like CRIU maybe required to checkpoint and restore tasks
+	// NOTE: Checkpoint supports to dump task information to a directory, in this way,
+	// an empty OCI Index will be returned.
 	Checkpoint(context.Context, ...CheckpointTaskOpts) (Image, error)
 	// Update modifies executing tasks with updated settings
 	Update(context.Context, ...UpdateTaskOpts) error
@@ -141,16 +182,29 @@ type Task interface {
 	// For the built in Linux runtime, github.com/containerd/cgroups.Metrics
 	// are returned in protobuf format
 	Metrics(context.Context) (*types.Metric, error)
+	// Spec returns the current OCI specification for the task
+	Spec(context.Context) (*oci.Spec, error)
 }
 
 var _ = (Task)(&task{})
 
 type task struct {
 	client *Client
+	c      Container
 
 	io  cio.IO
 	id  string
 	pid uint32
+}
+
+// Spec returns the current OCI specification for the task
+func (t *task) Spec(ctx context.Context) (*oci.Spec, error) {
+	return t.c.Spec(ctx)
+}
+
+// ID of the task
+func (t *task) ID() string {
+	return t.id
 }
 
 // Pid returns the pid or process id for the task
@@ -163,7 +217,10 @@ func (t *task) Start(ctx context.Context) error {
 		ContainerID: t.id,
 	})
 	if err != nil {
-		t.io.Close()
+		if t.io != nil {
+			t.io.Cancel()
+			t.io.Close()
+		}
 		return errdefs.FromGRPC(err)
 	}
 	t.pid = r.Pid
@@ -213,7 +270,7 @@ func (t *task) Status(ctx context.Context) (Status, error) {
 	return Status{
 		Status:     ProcessStatus(strings.ToLower(r.Process.Status.String())),
 		ExitStatus: r.Process.ExitStatus,
-		ExitTime:   r.Process.ExitedAt,
+		ExitTime:   protobuf.FromTimestamp(r.Process.ExitedAt),
 	}, nil
 }
 
@@ -233,7 +290,7 @@ func (t *task) Wait(ctx context.Context) (<-chan ExitStatus, error) {
 		}
 		c <- ExitStatus{
 			code:     r.ExitStatus,
-			exitedAt: r.ExitedAt,
+			exitedAt: protobuf.FromTimestamp(r.ExitedAt),
 		}
 	}()
 	return c, nil
@@ -259,14 +316,28 @@ func (t *task) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitStat
 			// On windows Created is akin to Stopped
 			break
 		}
+		if t.pid == 0 {
+			// allow for deletion of created tasks with PID 0
+			// https://github.com/containerd/containerd/issues/7357
+			break
+		}
 		fallthrough
 	default:
-		return nil, errors.Wrapf(errdefs.ErrFailedPrecondition, "task must be stopped before deletion: %s", status.Status)
+		return nil, fmt.Errorf("task must be stopped before deletion: %s: %w", status.Status, errdefs.ErrFailedPrecondition)
 	}
 	if t.io != nil {
+		// io.Wait locks for restored tasks on Windows unless we call
+		// io.Close first (https://github.com/containerd/containerd/issues/5621)
+		// in other cases, preserve the contract and let IO finish before closing
+		if t.client.runtime == fmt.Sprintf("%s.%s", plugin.RuntimePlugin, "windows") {
+			t.io.Close()
+		}
+		// io.Cancel is used to cancel the io goroutine while it is in
+		// fifo-opening state. It does not stop the pipes since these
+		// should be closed on the shim's side, otherwise we might lose
+		// data from the container!
 		t.io.Cancel()
 		t.io.Wait()
-		t.io.Close()
 	}
 	r, err := t.client.TaskService().Delete(ctx, &tasks.DeleteTaskRequest{
 		ContainerID: t.id,
@@ -274,18 +345,28 @@ func (t *task) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitStat
 	if err != nil {
 		return nil, errdefs.FromGRPC(err)
 	}
-	return &ExitStatus{code: r.ExitStatus, exitedAt: r.ExitedAt}, nil
+	// Only cleanup the IO after a successful Delete
+	if t.io != nil {
+		t.io.Close()
+	}
+	return &ExitStatus{code: r.ExitStatus, exitedAt: protobuf.FromTimestamp(r.ExitedAt)}, nil
 }
 
-func (t *task) Exec(ctx context.Context, id string, spec *specs.Process, ioCreate cio.Creation) (Process, error) {
+func (t *task) Exec(ctx context.Context, id string, spec *specs.Process, ioCreate cio.Creator) (_ Process, err error) {
 	if id == "" {
-		return nil, errors.Wrapf(errdefs.ErrInvalidArgument, "exec id must not be empty")
+		return nil, fmt.Errorf("exec id must not be empty: %w", errdefs.ErrInvalidArgument)
 	}
 	i, err := ioCreate(id)
 	if err != nil {
 		return nil, err
 	}
-	any, err := typeurl.MarshalAny(spec)
+	defer func() {
+		if err != nil && i != nil {
+			i.Cancel()
+			i.Close()
+		}
+	}()
+	any, err := protobuf.MarshalAnyToProto(spec)
 	if err != nil {
 		return nil, err
 	}
@@ -355,17 +436,25 @@ func (t *task) Resize(ctx context.Context, w, h uint32) error {
 	return errdefs.FromGRPC(err)
 }
 
+// NOTE: Checkpoint supports to dump task information to a directory, in this way, an empty
+// OCI Index will be returned.
 func (t *task) Checkpoint(ctx context.Context, opts ...CheckpointTaskOpts) (Image, error) {
-	ctx, done, err := t.client.withLease(ctx)
+	ctx, done, err := t.client.WithLease(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer done()
+	defer done(ctx)
+	cr, err := t.client.ContainerService().Get(ctx, t.id)
+	if err != nil {
+		return nil, err
+	}
 
 	request := &tasks.CheckpointTaskRequest{
 		ContainerID: t.id,
 	}
-	var i CheckpointTaskInfo
+	i := CheckpointTaskInfo{
+		runtime: cr.Runtime.Name,
+	}
 	for _, o := range opts {
 		if err := o(&i); err != nil {
 			return nil, err
@@ -375,29 +464,43 @@ func (t *task) Checkpoint(ctx context.Context, opts ...CheckpointTaskOpts) (Imag
 	if i.Name == "" {
 		i.Name = fmt.Sprintf(checkpointNameFormat, t.id, time.Now().Format(checkpointDateFormat))
 	}
-	request.ParentCheckpoint = i.ParentCheckpoint
+	request.ParentCheckpoint = i.ParentCheckpoint.String()
 	if i.Options != nil {
-		any, err := typeurl.MarshalAny(i.Options)
+		any, err := protobuf.MarshalAnyToProto(i.Options)
 		if err != nil {
 			return nil, err
 		}
 		request.Options = any
 	}
-	// make sure we pause it and resume after all other filesystem operations are completed
-	if err := t.Pause(ctx); err != nil {
-		return nil, err
-	}
-	defer t.Resume(ctx)
-	cr, err := t.client.ContainerService().Get(ctx, t.id)
+
+	status, err := t.Status(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	if status.Status != Paused {
+		// make sure we pause it and resume after all other filesystem operations are completed
+		if err := t.Pause(ctx); err != nil {
+			return nil, err
+		}
+		defer t.Resume(ctx)
+	}
+
 	index := v1.Index{
+		Versioned: is.Versioned{
+			SchemaVersion: 2,
+		},
 		Annotations: make(map[string]string),
 	}
 	if err := t.checkpointTask(ctx, &index, request); err != nil {
 		return nil, err
 	}
+	// if checkpoint image path passed, jump checkpoint image,
+	// return an empty image
+	if isCheckpointPathExist(cr.Runtime.Name, i.Options) {
+		return NewImage(t.client, images.Image{}), nil
+	}
+
 	if cr.Image != "" {
 		if err := t.checkpointImage(ctx, &index, cr.Image); err != nil {
 			return nil, err
@@ -423,16 +526,15 @@ func (t *task) Checkpoint(ctx context.Context, opts ...CheckpointTaskOpts) (Imag
 	if im, err = t.client.ImageService().Create(ctx, im); err != nil {
 		return nil, err
 	}
-	return &image{
-		client: t.client,
-		i:      im,
-	}, nil
+	return NewImage(t.client, im), nil
 }
 
 // UpdateTaskInfo allows updated specific settings to be changed on a task
 type UpdateTaskInfo struct {
 	// Resources updates a tasks resource constraints
 	Resources interface{}
+	// Annotations allows arbitrary and/or experimental resource constraints for task update
+	Annotations map[string]string
 }
 
 // UpdateTaskOpts allows a caller to update task settings
@@ -453,13 +555,19 @@ func (t *task) Update(ctx context.Context, opts ...UpdateTaskOpts) error {
 		if err != nil {
 			return err
 		}
-		request.Resources = any
+		request.Resources = protobuf.FromAny(any)
+	}
+	if i.Annotations != nil {
+		request.Annotations = i.Annotations
 	}
 	_, err := t.client.TaskService().Update(ctx, request)
 	return errdefs.FromGRPC(err)
 }
 
 func (t *task) LoadProcess(ctx context.Context, id string, ioAttach cio.Attach) (Process, error) {
+	if id == t.id && ioAttach == nil {
+		return t, nil
+	}
 	response, err := t.client.TaskService().Get(ctx, &tasks.GetRequest{
 		ContainerID: t.id,
 		ExecID:      id,
@@ -467,7 +575,7 @@ func (t *task) LoadProcess(ctx context.Context, id string, ioAttach cio.Attach) 
 	if err != nil {
 		err = errdefs.FromGRPC(err)
 		if errdefs.IsNotFound(err) {
-			return nil, errors.Wrapf(err, "no running process found")
+			return nil, fmt.Errorf("no running process found: %w", err)
 		}
 		return nil, err
 	}
@@ -510,16 +618,18 @@ func (t *task) checkpointTask(ctx context.Context, index *v1.Index, request *tas
 	if err != nil {
 		return errdefs.FromGRPC(err)
 	}
+	// NOTE: response.Descriptors can be an empty slice if checkpoint image is jumped
 	// add the checkpoint descriptors to the index
 	for _, d := range response.Descriptors {
 		index.Manifests = append(index.Manifests, v1.Descriptor{
 			MediaType: d.MediaType,
-			Size:      d.Size_,
-			Digest:    d.Digest,
+			Size:      d.Size,
+			Digest:    digest.Digest(d.Digest),
 			Platform: &v1.Platform{
 				OS:           goruntime.GOOS,
 				Architecture: goruntime.GOARCH,
 			},
+			Annotations: d.Annotations,
 		})
 	}
 	return nil
@@ -529,7 +639,7 @@ func (t *task) checkpointRWSnapshot(ctx context.Context, index *v1.Index, snapsh
 	opts := []diff.Opt{
 		diff.WithReference(fmt.Sprintf("checkpoint-rw-%s", id)),
 	}
-	rw, err := rootfs.Diff(ctx, id, t.client.SnapshotService(snapshotterName), t.client.DiffService(), opts...)
+	rw, err := rootfs.CreateDiff(ctx, id, t.client.SnapshotService(snapshotterName), t.client.DiffService(), opts...)
 	if err != nil {
 		return err
 	}
@@ -565,8 +675,8 @@ func (t *task) writeIndex(ctx context.Context, index *v1.Index) (d v1.Descriptor
 	return writeContent(ctx, t.client.ContentStore(), v1.MediaTypeImageIndex, t.id, buf, content.WithLabels(labels))
 }
 
-func writeContent(ctx context.Context, store content.Store, mediaType, ref string, r io.Reader, opts ...content.Opt) (d v1.Descriptor, err error) {
-	writer, err := store.Writer(ctx, ref, 0, "")
+func writeContent(ctx context.Context, store content.Ingester, mediaType, ref string, r io.Reader, opts ...content.Opt) (d v1.Descriptor, err error) {
+	writer, err := store.Writer(ctx, content.WithRef(ref))
 	if err != nil {
 		return d, err
 	}
@@ -575,12 +685,36 @@ func writeContent(ctx context.Context, store content.Store, mediaType, ref strin
 	if err != nil {
 		return d, err
 	}
+
 	if err := writer.Commit(ctx, size, "", opts...); err != nil {
-		return d, err
+		if !errdefs.IsAlreadyExists(err) {
+			return d, err
+		}
 	}
 	return v1.Descriptor{
 		MediaType: mediaType,
 		Digest:    writer.Digest(),
 		Size:      size,
 	}, nil
+}
+
+// isCheckpointPathExist only suitable for runc runtime now
+func isCheckpointPathExist(runtime string, v interface{}) bool {
+	if v == nil {
+		return false
+	}
+
+	switch runtime {
+	case plugin.RuntimeRuncV1, plugin.RuntimeRuncV2:
+		if opts, ok := v.(*options.CheckpointOptions); ok && opts.ImagePath != "" {
+			return true
+		}
+
+	case plugin.RuntimeLinuxV1:
+		if opts, ok := v.(*runctypes.CheckpointOptions); ok && opts.ImagePath != "" {
+			return true
+		}
+	}
+
+	return false
 }

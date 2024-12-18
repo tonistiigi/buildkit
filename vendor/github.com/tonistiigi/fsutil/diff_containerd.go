@@ -1,10 +1,14 @@
 package fsutil
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"golang.org/x/net/context"
+	"github.com/tonistiigi/fsutil/types"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -30,18 +34,33 @@ const (
 	ChangeKindDelete
 )
 
+func (k ChangeKind) String() string {
+	switch k {
+	case ChangeKindAdd:
+		return "add"
+	case ChangeKindModify:
+		return "modify"
+	case ChangeKindDelete:
+		return "delete"
+	default:
+		return "unknown"
+	}
+}
+
 // ChangeFunc is the type of function called for each change
 // computed during a directory changes calculation.
 type ChangeFunc func(ChangeKind, string, os.FileInfo, error) error
 
+const compareChunkSize = 32 * 1024
+
 type currentPath struct {
 	path string
-	f    os.FileInfo
+	stat *types.Stat
 	//	fullPath string
 }
 
 // doubleWalkDiff walks both directories to create a diff
-func doubleWalkDiff(ctx context.Context, changeFn ChangeFunc, a, b walkerFn) (err error) {
+func doubleWalkDiff(ctx context.Context, changeFn ChangeFunc, a, b walkerFn, filter FilterFunc, differ DiffType) (err error) {
 	g, ctx := errgroup.WithContext(ctx)
 
 	var (
@@ -85,14 +104,22 @@ func doubleWalkDiff(ctx context.Context, changeFn ChangeFunc, a, b walkerFn) (er
 				continue
 			}
 
-			var f os.FileInfo
-			k, p := pathChange(f1, f2)
+			var f *types.Stat
+			var f2copy *currentPath
+			if f2 != nil {
+				statCopy := f2.stat.Clone()
+				if filter != nil {
+					filter(f2.path, statCopy)
+				}
+				f2copy = &currentPath{path: f2.path, stat: statCopy}
+			}
+			k, p := pathChange(f1, f2copy)
 			switch k {
 			case ChangeKindAdd:
 				if rmdir != "" {
 					rmdir = ""
 				}
-				f = f2.f
+				f = f2.stat
 				f2 = nil
 			case ChangeKindDelete:
 				// Check if this file is already removed by being
@@ -100,30 +127,30 @@ func doubleWalkDiff(ctx context.Context, changeFn ChangeFunc, a, b walkerFn) (er
 				if rmdir != "" && strings.HasPrefix(f1.path, rmdir) {
 					f1 = nil
 					continue
-				} else if rmdir == "" && f1.f.IsDir() {
-					rmdir = f1.path + string(os.PathSeparator)
+				} else if rmdir == "" && f1.stat.IsDir() {
+					rmdir = f1.path + string(filepath.Separator)
 				} else if rmdir != "" {
 					rmdir = ""
 				}
 				f1 = nil
 			case ChangeKindModify:
-				same, err := sameFile(f1, f2)
+				same, err := sameFile(f1, f2copy, differ)
 				if err != nil {
 					return err
 				}
-				if f1.f.IsDir() && !f2.f.IsDir() {
-					rmdir = f1.path + string(os.PathSeparator)
+				if f1.stat.IsDir() && !f2copy.stat.IsDir() {
+					rmdir = f1.path + string(filepath.Separator)
 				} else if rmdir != "" {
 					rmdir = ""
 				}
-				f = f2.f
+				f = f2.stat
 				f1 = nil
 				f2 = nil
 				if same {
 					continue loop0
 				}
 			}
-			if err := changeFn(k, p, f, nil); err != nil {
+			if err := changeFn(k, p, &StatInfo{f}, nil); err != nil {
 				return err
 			}
 		}
@@ -156,36 +183,64 @@ func pathChange(lower, upper *currentPath) (ChangeKind, string) {
 	}
 }
 
-func sameFile(f1, f2 *currentPath) (same bool, retErr error) {
+func sameFile(f1, f2 *currentPath, differ DiffType) (same bool, retErr error) {
+	if differ == DiffNone {
+		return false, nil
+	}
 	// If not a directory also check size, modtime, and content
-	if !f1.f.IsDir() {
-		if f1.f.Size() != f2.f.Size() {
+	if !f1.stat.IsDir() {
+		if f1.stat.Size != f2.stat.Size {
 			return false, nil
 		}
 
-		t1 := f1.f.ModTime()
-		t2 := f2.f.ModTime()
-		if t1.UnixNano() != t2.UnixNano() {
+		if f1.stat.ModTime != f2.stat.ModTime {
 			return false, nil
 		}
 	}
 
-	ls1, ok := f1.f.Sys().(*Stat)
-	if !ok {
-		return false, nil
+	same, err := compareStat(f1.stat, f2.stat)
+	if err != nil || !same || differ == DiffMetadata {
+		return same, err
 	}
-	ls2, ok := f1.f.Sys().(*Stat)
-	if !ok {
-		return false, nil
-	}
+	return compareFileContent(f1.path, f2.path)
+}
 
-	return compareStat(ls1, ls2)
+func compareFileContent(p1, p2 string) (bool, error) {
+	f1, err := os.Open(p1)
+	if err != nil {
+		return false, err
+	}
+	defer f1.Close()
+	f2, err := os.Open(p2)
+	if err != nil {
+		return false, err
+	}
+	defer f2.Close()
+
+	b1 := make([]byte, compareChunkSize)
+	b2 := make([]byte, compareChunkSize)
+	for {
+		n1, err1 := f1.Read(b1)
+		if err1 != nil && err1 != io.EOF {
+			return false, err1
+		}
+		n2, err2 := f2.Read(b2)
+		if err2 != nil && err2 != io.EOF {
+			return false, err2
+		}
+		if n1 != n2 || !bytes.Equal(b1[:n1], b2[:n2]) {
+			return false, nil
+		}
+		if err1 == io.EOF && err2 == io.EOF {
+			return true, nil
+		}
+	}
 }
 
 // compareStat returns whether the stats are equivalent,
 // whether the files are considered the same file, and
 // an error
-func compareStat(ls1, ls2 *Stat) (bool, error) {
+func compareStat(ls1, ls2 *types.Stat) (bool, error) {
 	return ls1.Mode == ls2.Mode && ls1.Uid == ls2.Uid && ls1.Gid == ls2.Gid && ls1.Devmajor == ls2.Devmajor && ls1.Devminor == ls2.Devminor && ls1.Linkname == ls2.Linkname, nil
 }
 

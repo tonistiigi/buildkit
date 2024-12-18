@@ -1,57 +1,130 @@
 package auth
 
 import (
-	"io/ioutil"
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"sync"
 
-	"github.com/docker/cli/cli/config"
-	"github.com/docker/cli/cli/config/configfile"
 	"github.com/moby/buildkit/session"
-	"golang.org/x/net/context"
-	"google.golang.org/grpc"
+	"github.com/moby/buildkit/util/grpcerrors"
+	"github.com/pkg/errors"
+	"golang.org/x/crypto/nacl/sign"
+	"google.golang.org/grpc/codes"
 )
 
-func NewDockerAuthProvider() session.Attachable {
-	return &authProvider{
-		config: config.LoadDefaultConfigFile(ioutil.Discard),
+var salt []byte
+var saltOnce sync.Once
+
+// getSalt returns unique component per daemon restart to avoid persistent keys
+func getSalt() []byte {
+	saltOnce.Do(func() {
+		salt = make([]byte, 32)
+		rand.Read(salt)
+	})
+	return salt
+}
+
+func CredentialsFunc(sm *session.Manager, g session.Group) func(string) (session, username, secret string, err error) {
+	return func(host string) (string, string, string, error) {
+		var sessionID, user, secret string
+		err := sm.Any(context.TODO(), g, func(ctx context.Context, id string, c session.Caller) error {
+			client := NewAuthClient(c.Conn())
+
+			resp, err := client.Credentials(ctx, &CredentialsRequest{
+				Host: host,
+			})
+			if err != nil {
+				if grpcerrors.Code(err) == codes.Unimplemented {
+					return nil
+				}
+				return err
+			}
+			sessionID = id
+			user = resp.Username
+			secret = resp.Secret
+			return nil
+		})
+		if err != nil {
+			return "", "", "", err
+		}
+		return sessionID, user, secret, nil
 	}
 }
 
-type authProvider struct {
-	config *configfile.ConfigFile
-}
+func FetchToken(ctx context.Context, req *FetchTokenRequest, sm *session.Manager, g session.Group) (resp *FetchTokenResponse, err error) {
+	err = sm.Any(ctx, g, func(ctx context.Context, id string, c session.Caller) error {
+		client := NewAuthClient(c.Conn())
 
-func (ap *authProvider) Register(server *grpc.Server) {
-	RegisterAuthServer(server, ap)
-}
-
-func (ap *authProvider) Credentials(ctx context.Context, req *CredentialsRequest) (*CredentialsResponse, error) {
-	if req.Host == "registry-1.docker.io" {
-		req.Host = "https://index.docker.io/v1/"
-	}
-	ac, err := ap.config.GetAuthConfig(req.Host)
+		resp, err = client.FetchToken(ctx, req)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	res := &CredentialsResponse{}
-	if ac.IdentityToken != "" {
-		res.Secret = ac.IdentityToken
-	} else {
-		res.Username = ac.Username
-		res.Secret = ac.Password
-	}
-	return res, nil
+	return resp, nil
 }
 
-func CredentialsFunc(ctx context.Context, c session.Caller) func(string) (string, string, error) {
-	return func(host string) (string, string, error) {
+func VerifyTokenAuthority(ctx context.Context, host string, pubKey *[32]byte, sm *session.Manager, g session.Group) (sessionID string, ok bool, err error) {
+	var verified bool
+	err = sm.Any(ctx, g, func(ctx context.Context, id string, c session.Caller) error {
 		client := NewAuthClient(c.Conn())
 
-		resp, err := client.Credentials(ctx, &CredentialsRequest{
-			Host: host,
+		payload := make([]byte, 32)
+		rand.Read(payload)
+		resp, err := client.VerifyTokenAuthority(ctx, &VerifyTokenAuthorityRequest{
+			Host:    host,
+			Salt:    getSalt(),
+			Payload: payload,
 		})
 		if err != nil {
-			return "", "", err
+			if grpcerrors.Code(err) == codes.Unimplemented {
+				return nil
+			}
+			return err
 		}
-		return resp.Username, resp.Secret, nil
+		var dt []byte
+		dt, ok = sign.Open(nil, resp.Signed, pubKey)
+		if ok && subtle.ConstantTimeCompare(dt, payload) == 1 {
+			verified = true
+		}
+		sessionID = id
+		return nil
+	})
+	if err != nil {
+		return "", false, err
 	}
+	return sessionID, verified, nil
+}
+
+func GetTokenAuthority(ctx context.Context, host string, sm *session.Manager, g session.Group) (sessionID string, pubKey *[32]byte, err error) {
+	err = sm.Any(ctx, g, func(ctx context.Context, id string, c session.Caller) error {
+		client := NewAuthClient(c.Conn())
+
+		resp, err := client.GetTokenAuthority(ctx, &GetTokenAuthorityRequest{
+			Host: host,
+			Salt: getSalt(),
+		})
+		if err != nil {
+			if grpcerrors.Code(err) == codes.Unimplemented || grpcerrors.Code(err) == codes.Unavailable {
+				return nil
+			}
+			return err
+		}
+		if len(resp.PublicKey) != 32 {
+			return errors.Errorf("invalid pubkey length %d", len(pubKey))
+		}
+
+		sessionID = id
+		pubKey = new([32]byte)
+		copy((*pubKey)[:], resp.PublicKey)
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return sessionID, pubKey, nil
 }

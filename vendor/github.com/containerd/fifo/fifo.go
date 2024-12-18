@@ -1,14 +1,33 @@
+//go:build !windows
+
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package fifo
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"runtime"
 	"sync"
 	"syscall"
 
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
+	"golang.org/x/sys/unix"
 )
 
 type fifo struct {
@@ -25,21 +44,46 @@ type fifo struct {
 
 var leakCheckWg *sync.WaitGroup
 
+// OpenFifoDup2 is same as OpenFifo, but additionally creates a copy of the FIFO file descriptor with dup2 syscall.
+func OpenFifoDup2(ctx context.Context, fn string, flag int, perm os.FileMode, fd int) (io.ReadWriteCloser, error) {
+	f, err := openFifo(ctx, fn, flag, perm)
+	if err != nil {
+		return nil, fmt.Errorf("fifo error: %w", err)
+	}
+
+	if err := unix.Dup2(int(f.file.Fd()), fd); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("dup2 error: %w", err)
+	}
+
+	return f, nil
+}
+
 // OpenFifo opens a fifo. Returns io.ReadWriteCloser.
 // Context can be used to cancel this function until open(2) has not returned.
 // Accepted flags:
-// - syscall.O_CREAT - create new fifo if one doesn't exist
-// - syscall.O_RDONLY - open fifo only from reader side
-// - syscall.O_WRONLY - open fifo only from writer side
-// - syscall.O_RDWR - open fifo from both sides, never block on syscall level
-// - syscall.O_NONBLOCK - return io.ReadWriteCloser even if other side of the
+//   - syscall.O_CREAT - create new fifo if one doesn't exist
+//   - syscall.O_RDONLY - open fifo only from reader side
+//   - syscall.O_WRONLY - open fifo only from writer side
+//   - syscall.O_RDWR - open fifo from both sides, never block on syscall level
+//   - syscall.O_NONBLOCK - return io.ReadWriteCloser even if other side of the
 //     fifo isn't open. read/write will be connected after the actual fifo is
 //     open or after fifo is closed.
 func OpenFifo(ctx context.Context, fn string, flag int, perm os.FileMode) (io.ReadWriteCloser, error) {
+	fifo, err := openFifo(ctx, fn, flag, perm)
+	if fifo == nil {
+		// Do not return a non-nil ReadWriteCloser((*fifo)(nil)) value
+		// as that can confuse callers.
+		return nil, err
+	}
+	return fifo, err
+}
+
+func openFifo(ctx context.Context, fn string, flag int, perm os.FileMode) (*fifo, error) {
 	if _, err := os.Stat(fn); err != nil {
 		if os.IsNotExist(err) && flag&syscall.O_CREAT != 0 {
-			if err := mkfifo(fn, uint32(perm&os.ModePerm)); err != nil && !os.IsExist(err) {
-				return nil, errors.Wrapf(err, "error creating fifo %v", fn)
+			if err := syscall.Mkfifo(fn, uint32(perm&os.ModePerm)); err != nil && !os.IsExist(err) {
+				return nil, fmt.Errorf("error creating fifo %v: %w", fn, err)
 			}
 		} else {
 			return nil, err
@@ -100,7 +144,7 @@ func OpenFifo(ctx context.Context, fn string, flag int, perm os.FileMode) (io.Re
 				case <-ctx.Done():
 					err = ctx.Err()
 				default:
-					err = errors.Errorf("fifo %v was closed before opening", h.Name())
+					err = fmt.Errorf("fifo %v was closed before opening", h.Name())
 				}
 				if file != nil {
 					file.Close()
@@ -131,7 +175,7 @@ func OpenFifo(ctx context.Context, fn string, flag int, perm os.FileMode) (io.Re
 // Read from a fifo to a byte array.
 func (f *fifo) Read(b []byte) (int, error) {
 	if f.flag&syscall.O_WRONLY > 0 {
-		return 0, errors.New("reading from write-only fifo")
+		return 0, ErrRdFrmWRONLY
 	}
 	select {
 	case <-f.opened:
@@ -142,14 +186,14 @@ func (f *fifo) Read(b []byte) (int, error) {
 	case <-f.opened:
 		return f.file.Read(b)
 	case <-f.closed:
-		return 0, errors.New("reading from a closed fifo")
+		return 0, ErrReadClosed
 	}
 }
 
 // Write from byte array to a fifo.
 func (f *fifo) Write(b []byte) (int, error) {
 	if f.flag&(syscall.O_WRONLY|syscall.O_RDWR) == 0 {
-		return 0, errors.New("writing to read-only fifo")
+		return 0, ErrWrToRDONLY
 	}
 	select {
 	case <-f.opened:
@@ -160,7 +204,7 @@ func (f *fifo) Write(b []byte) (int, error) {
 	case <-f.opened:
 		return f.file.Write(b)
 	case <-f.closed:
-		return 0, errors.New("writing to a closed fifo")
+		return 0, ErrWriteClosed
 	}
 }
 
@@ -168,6 +212,10 @@ func (f *fifo) Write(b []byte) (int, error) {
 // before open(2) has returned and fifo was never opened.
 func (f *fifo) Close() (retErr error) {
 	for {
+		if f == nil {
+			return
+		}
+
 		select {
 		case <-f.closed:
 			f.handle.Close()

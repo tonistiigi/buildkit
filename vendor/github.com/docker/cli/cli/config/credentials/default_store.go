@@ -1,19 +1,22 @@
 package credentials
 
-import (
-	"os/exec"
-)
+import "os/exec"
 
 // DetectDefaultStore return the default credentials store for the platform if
-// the store executable is available.
+// no user-defined store is passed, and the store executable is available.
 func DetectDefaultStore(store string) string {
-	// user defined or no default for platform
-	if store != "" || defaultCredentialsStore == "" {
+	if store != "" {
+		// use user-defined
 		return store
 	}
 
-	if _, err := exec.LookPath(remoteCredentialsPrefix + defaultCredentialsStore); err == nil {
-		return defaultCredentialsStore
+	platformDefault := defaultCredentialsStore()
+	if platformDefault == "" {
+		return ""
 	}
-	return ""
+
+	if _, err := exec.LookPath(remoteCredentialsPrefix + platformDefault); err != nil {
+		return ""
+	}
+	return platformDefault
 }

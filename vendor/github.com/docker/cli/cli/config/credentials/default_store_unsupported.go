@@ -1,5 +1,7 @@
-// +build !windows,!darwin,!linux
+//go:build !windows && !darwin && !linux
 
 package credentials
 
-const defaultCredentialsStore = ""
+func defaultCredentialsStore() string {
+	return ""
+}

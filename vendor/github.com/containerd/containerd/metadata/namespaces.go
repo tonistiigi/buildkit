@@ -1,13 +1,31 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package metadata
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
-	"github.com/boltdb/bolt"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/identifiers"
 	l "github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/namespaces"
-	"github.com/pkg/errors"
+	bolt "go.etcd.io/bbolt"
 )
 
 type namespaceStore struct {
@@ -25,13 +43,13 @@ func (s *namespaceStore) Create(ctx context.Context, namespace string, labels ma
 		return err
 	}
 
-	if err := namespaces.Validate(namespace); err != nil {
+	if err := identifiers.Validate(namespace); err != nil {
 		return err
 	}
 
 	for k, v := range labels {
 		if err := l.Validate(k, v); err != nil {
-			return errors.Wrapf(err, "namespace.Labels")
+			return fmt.Errorf("namespace.Labels: %w", err)
 		}
 	}
 
@@ -39,7 +57,7 @@ func (s *namespaceStore) Create(ctx context.Context, namespace string, labels ma
 	bkt, err := topbkt.CreateBucket([]byte(namespace))
 	if err != nil {
 		if err == bolt.ErrBucketExists {
-			return errors.Wrapf(errdefs.ErrAlreadyExists, "namespace %q", namespace)
+			return fmt.Errorf("namespace %q: %w", namespace, errdefs.ErrAlreadyExists)
 		}
 
 		return err
@@ -79,7 +97,7 @@ func (s *namespaceStore) Labels(ctx context.Context, namespace string) (map[stri
 
 func (s *namespaceStore) SetLabel(ctx context.Context, namespace, key, value string) error {
 	if err := l.Validate(key, value); err != nil {
-		return errors.Wrapf(err, "namespace.Labels")
+		return fmt.Errorf("namespace.Labels: %w", err)
 	}
 
 	return withNamespacesLabelsBucket(s.tx, namespace, func(bkt *bolt.Bucket) error {
@@ -113,17 +131,32 @@ func (s *namespaceStore) List(ctx context.Context) ([]string, error) {
 	return namespaces, nil
 }
 
-func (s *namespaceStore) Delete(ctx context.Context, namespace string) error {
+func (s *namespaceStore) Delete(ctx context.Context, namespace string, opts ...namespaces.DeleteOpts) error {
+	i := &namespaces.DeleteInfo{
+		Name: namespace,
+	}
+	for _, o := range opts {
+		if err := o(ctx, i); err != nil {
+			return err
+		}
+	}
 	bkt := getBucket(s.tx, bucketKeyVersion)
-	if empty, err := s.namespaceEmpty(ctx, namespace); err != nil {
+	types, err := s.listNs(namespace)
+	if err != nil {
 		return err
-	} else if !empty {
-		return errors.Wrapf(errdefs.ErrFailedPrecondition, "namespace %q must be empty", namespace)
+	}
+
+	if len(types) > 0 {
+		return fmt.Errorf(
+			"namespace %q must be empty, but it still has %s: %w",
+			namespace, strings.Join(types, ", "),
+			errdefs.ErrFailedPrecondition,
+		)
 	}
 
 	if err := bkt.DeleteBucket([]byte(namespace)); err != nil {
 		if err == bolt.ErrBucketNotFound {
-			return errors.Wrapf(errdefs.ErrNotFound, "namespace %q", namespace)
+			return fmt.Errorf("namespace %q: %w", namespace, errdefs.ErrNotFound)
 		}
 
 		return err
@@ -132,32 +165,42 @@ func (s *namespaceStore) Delete(ctx context.Context, namespace string) error {
 	return nil
 }
 
-func (s *namespaceStore) namespaceEmpty(ctx context.Context, namespace string) (bool, error) {
-	ctx = namespaces.WithNamespace(ctx, namespace)
+// listNs returns the types of the remaining objects inside the given namespace.
+// It doesn't return exact objects due to performance concerns.
+func (s *namespaceStore) listNs(namespace string) ([]string, error) {
+	var out []string
 
-	// need to check the various object stores.
-
-	imageStore := NewImageStore(s.tx)
-	images, err := imageStore.List(ctx)
-	if err != nil {
-		return false, err
+	if !isBucketEmpty(getImagesBucket(s.tx, namespace)) {
+		out = append(out, "images")
 	}
-	if len(images) > 0 {
-		return false, nil
+	if !isBucketEmpty(getBlobsBucket(s.tx, namespace)) {
+		out = append(out, "blobs")
 	}
-
-	containerStore := NewContainerStore(s.tx)
-	containers, err := containerStore.List(ctx)
-	if err != nil {
-		return false, err
+	if !isBucketEmpty(getContainersBucket(s.tx, namespace)) {
+		out = append(out, "containers")
 	}
 
-	if len(containers) > 0 {
-		return false, nil
+	if snbkt := getSnapshottersBucket(s.tx, namespace); snbkt != nil {
+		if err := snbkt.ForEach(func(k, v []byte) error {
+			if v == nil {
+				if !isBucketEmpty(snbkt.Bucket(k)) {
+					out = append(out, fmt.Sprintf("snapshots on %q snapshotter", k))
+				}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
 	}
 
-	// TODO(stevvooe): Need to add check for content store, as well. Still need
-	// to make content store namespace aware.
+	return out, nil
+}
 
-	return true, nil
+func isBucketEmpty(bkt *bolt.Bucket) bool {
+	if bkt == nil {
+		return true
+	}
+
+	k, _ := bkt.Cursor().First()
+	return k == nil
 }

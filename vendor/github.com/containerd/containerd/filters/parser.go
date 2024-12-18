@@ -1,12 +1,26 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package filters
 
 import (
 	"fmt"
 	"io"
-	"strconv"
 
 	"github.com/containerd/containerd/errdefs"
-	"github.com/pkg/errors"
 )
 
 /*
@@ -31,7 +45,6 @@ field     := quoted | [A-Za-z] [A-Za-z0-9_]+
 operator  := "==" | "!=" | "~="
 value     := quoted | [^\s,]+
 quoted    := <go string syntax>
-
 */
 func Parse(s string) (Filter, error) {
 	// special case empty to match all
@@ -56,7 +69,7 @@ func ParseAll(ss ...string) (Filter, error) {
 	for _, s := range ss {
 		f, err := Parse(s)
 		if err != nil {
-			return nil, errors.Wrapf(errdefs.ErrInvalidArgument, err.Error())
+			return nil, fmt.Errorf("%s: %w", err.Error(), errdefs.ErrInvalidArgument)
 		}
 
 		fs = append(fs, f)
@@ -75,7 +88,7 @@ func (p *parser) parse() (Filter, error) {
 
 	ss, err := p.selectors()
 	if err != nil {
-		return nil, errors.Wrap(err, "filters")
+		return nil, fmt.Errorf("filters: %w", err)
 	}
 
 	return ss, nil
@@ -134,7 +147,12 @@ func (p *parser) selector() (selector, error) {
 		return selector{}, err
 	}
 
-	value, err := p.value()
+	var allowAltQuotes bool
+	if op == operatorMatches {
+		allowAltQuotes = true
+	}
+
+	value, err := p.value(allowAltQuotes)
 	if err != nil {
 		if err == io.EOF {
 			return selector{}, io.ErrUnexpectedEOF
@@ -188,7 +206,9 @@ func (p *parser) field() (string, error) {
 	case tokenField:
 		return s, nil
 	case tokenQuoted:
-		return p.unquote(pos, s)
+		return p.unquote(pos, s, false)
+	case tokenIllegal:
+		return "", p.mkerr(pos, p.scanner.err)
 	}
 
 	return "", p.mkerr(pos, "expected field or quoted")
@@ -208,26 +228,34 @@ func (p *parser) operator() (operator, error) {
 		default:
 			return 0, p.mkerr(pos, "unsupported operator %q", s)
 		}
+	case tokenIllegal:
+		return 0, p.mkerr(pos, p.scanner.err)
 	}
 
 	return 0, p.mkerr(pos, `expected an operator ("=="|"!="|"~=")`)
 }
 
-func (p *parser) value() (string, error) {
+func (p *parser) value(allowAltQuotes bool) (string, error) {
 	pos, tok, s := p.scanner.scan()
 
 	switch tok {
 	case tokenValue, tokenField:
 		return s, nil
 	case tokenQuoted:
-		return p.unquote(pos, s)
+		return p.unquote(pos, s, allowAltQuotes)
+	case tokenIllegal:
+		return "", p.mkerr(pos, p.scanner.err)
 	}
 
 	return "", p.mkerr(pos, "expected value or quoted")
 }
 
-func (p *parser) unquote(pos int, s string) (string, error) {
-	uq, err := strconv.Unquote(s)
+func (p *parser) unquote(pos int, s string, allowAlts bool) (string, error) {
+	if !allowAlts && s[0] != '\'' && s[0] != '"' {
+		return "", p.mkerr(pos, "invalid quote encountered")
+	}
+
+	uq, err := unquote(s)
 	if err != nil {
 		return "", p.mkerr(pos, "unquoting failed: %v", err)
 	}
@@ -254,9 +282,9 @@ func (pe parseError) Error() string {
 }
 
 func (p *parser) mkerr(pos int, format string, args ...interface{}) error {
-	return errors.Wrap(parseError{
+	return fmt.Errorf("parse error: %w", parseError{
 		input: p.input,
 		pos:   pos,
 		msg:   fmt.Sprintf(format, args...),
-	}, "parse error")
+	})
 }

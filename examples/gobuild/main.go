@@ -1,4 +1,4 @@
-// +build ignore
+//go:build ignore
 
 package main
 
@@ -31,19 +31,19 @@ func run() error {
 		return err
 	}
 
-	buildd, err := gb.BuildExe(gobuild.BuildOpt{
+	buildkitd, err := gb.BuildExe(gobuild.BuildOpt{
 		Source:    src,
 		MountPath: "/go/src/github.com/moby/buildkit",
-		Pkg:       "github.com/moby/buildkit/cmd/buildd",
-		BuildTags: []string{"standalone"},
+		Pkg:       "github.com/moby/buildkit/cmd/buildkitd",
+		BuildTags: []string{},
 	})
 	if err != nil {
 		return err
 	}
-	_ = buildd
+	_ = buildkitd
 
 	containerd, err := gb.BuildExe(gobuild.BuildOpt{
-		Source:    llb.Git("github.com/containerd/containerd", "master"),
+		Source:    llb.Git("github.com/containerd/containerd", "v1.2.7"),
 		MountPath: "/go/src/github.com/containerd/containerd",
 		Pkg:       "github.com/containerd/containerd/cmd/containerd",
 		BuildTags: []string{"no_btrfs"},
@@ -65,10 +65,10 @@ func run() error {
 	sc := llb.Scratch().
 		With(copyAll(*buildctl, "/")).
 		With(copyAll(*containerd, "/")).
-		// With(copyAll(*buildd, "/")).
+		// With(copyAll(*buildkitd, "/")).
 		With(copyAll(*runc, "/"))
 
-	dt, err := sc.Marshal()
+	dt, err := sc.Marshal(llb.LinuxAmd64)
 	if err != nil {
 		panic(err)
 	}

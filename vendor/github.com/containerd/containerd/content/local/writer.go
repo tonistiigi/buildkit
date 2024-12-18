@@ -1,16 +1,36 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package local
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"time"
 
+	"github.com/containerd/log"
+	"github.com/opencontainers/go-digest"
+
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/opencontainers/go-digest"
-	"github.com/pkg/errors"
 )
 
 // writer represents a write transaction against the blob store.
@@ -56,6 +76,9 @@ func (w *writer) Write(p []byte) (n int, err error) {
 }
 
 func (w *writer) Commit(ctx context.Context, size int64, expected digest.Digest, opts ...content.Opt) error {
+	// Ensure even on error the writer is fully closed
+	defer unlock(w.ref)
+
 	var base content.Info
 	for _, opt := range opts {
 		if err := opt(&base); err != nil {
@@ -63,17 +86,76 @@ func (w *writer) Commit(ctx context.Context, size int64, expected digest.Digest,
 		}
 	}
 
-	if w.fp == nil {
-		return errors.Wrap(errdefs.ErrFailedPrecondition, "cannot commit on closed writer")
+	fp := w.fp
+	w.fp = nil
+
+	if fp == nil {
+		return fmt.Errorf("cannot commit on closed writer: %w", errdefs.ErrFailedPrecondition)
 	}
 
-	if err := w.fp.Sync(); err != nil {
-		return errors.Wrap(err, "sync failed")
+	if err := fp.Sync(); err != nil {
+		fp.Close()
+		return fmt.Errorf("sync failed: %w", err)
 	}
 
-	fi, err := w.fp.Stat()
+	fi, err := fp.Stat()
+	closeErr := fp.Close()
 	if err != nil {
-		return errors.Wrap(err, "stat on ingest file failed")
+		return fmt.Errorf("stat on ingest file failed: %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("failed to close ingest file: %w", closeErr)
+	}
+
+	if size > 0 && size != fi.Size() {
+		return fmt.Errorf("unexpected commit size %d, expected %d: %w", fi.Size(), size, errdefs.ErrFailedPrecondition)
+	}
+
+	dgst := w.digester.Digest()
+	if expected != "" && expected != dgst {
+		return fmt.Errorf("unexpected commit digest %s, expected %s: %w", dgst, expected, errdefs.ErrFailedPrecondition)
+	}
+
+	var (
+		ingest    = filepath.Join(w.path, "data")
+		target, _ = w.s.blobPath(dgst) // ignore error because we calculated this dgst
+	)
+
+	// make sure parent directories of blob exist
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(target); err == nil {
+		// collision with the target file!
+		if err := os.RemoveAll(w.path); err != nil {
+			log.G(ctx).WithField("ref", w.ref).WithField("path", w.path).Error("failed to remove ingest directory")
+		}
+		return fmt.Errorf("content %v: %w", dgst, errdefs.ErrAlreadyExists)
+	}
+
+	if err := os.Rename(ingest, target); err != nil {
+		return err
+	}
+
+	// Ingest has now been made available in the content store, attempt to complete
+	// setting metadata but errors should only be logged and not returned since
+	// the content store cannot be cleanly rolled back.
+
+	commitTime := time.Now()
+	if err := os.Chtimes(target, commitTime, commitTime); err != nil {
+		log.G(ctx).WithField("digest", dgst).Error("failed to change file time to commit time")
+	}
+
+	// clean up!!
+	if err := os.RemoveAll(w.path); err != nil {
+		log.G(ctx).WithField("ref", w.ref).WithField("path", w.path).Error("failed to remove ingest directory")
+	}
+
+	if w.s.ls != nil && base.Labels != nil {
+		if err := w.s.ls.Set(dgst, base.Labels); err != nil {
+			log.G(ctx).WithField("digest", dgst).Error("failed to set labels")
+		}
 	}
 
 	// change to readonly, more important for read, but provides _some_
@@ -84,55 +166,8 @@ func (w *writer) Commit(ctx context.Context, size int64, expected digest.Digest,
 	//
 	// NOTE: Windows does not support this operation
 	if runtime.GOOS != "windows" {
-		if err := w.fp.Chmod((fi.Mode() & os.ModePerm) &^ 0333); err != nil {
-			return errors.Wrap(err, "failed to change ingest file permissions")
-		}
-	}
-
-	if size > 0 && size != fi.Size() {
-		return errors.Errorf("unexpected commit size %d, expected %d", fi.Size(), size)
-	}
-
-	if err := w.fp.Close(); err != nil {
-		return errors.Wrap(err, "failed closing ingest")
-	}
-
-	dgst := w.digester.Digest()
-	if expected != "" && expected != dgst {
-		return errors.Errorf("unexpected commit digest %s, expected %s", dgst, expected)
-	}
-
-	var (
-		ingest = filepath.Join(w.path, "data")
-		target = w.s.blobPath(dgst)
-	)
-
-	// make sure parent directories of blob exist
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		return err
-	}
-
-	// clean up!!
-	defer os.RemoveAll(w.path)
-
-	if err := os.Rename(ingest, target); err != nil {
-		if os.IsExist(err) {
-			// collision with the target file!
-			return errors.Wrapf(errdefs.ErrAlreadyExists, "content %v", dgst)
-		}
-		return err
-	}
-	commitTime := time.Now()
-	if err := os.Chtimes(target, commitTime, commitTime); err != nil {
-		return err
-	}
-
-	w.fp = nil
-	unlock(w.ref)
-
-	if w.s.ls != nil && base.Labels != nil {
-		if err := w.s.ls.Set(dgst, base.Labels); err != nil {
-			return err
+		if err := os.Chmod(target, (fi.Mode()&os.ModePerm)&^0333); err != nil {
+			log.G(ctx).WithField("ref", w.ref).Error("failed to make readonly")
 		}
 	}
 
@@ -167,5 +202,8 @@ func (w *writer) Truncate(size int64) error {
 	}
 	w.offset = 0
 	w.digester.Hash().Reset()
+	if _, err := w.fp.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	return w.fp.Truncate(0)
 }

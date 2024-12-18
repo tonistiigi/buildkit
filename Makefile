@@ -1,45 +1,122 @@
+prefix=/usr/local
+bindir=$(prefix)/bin
 
-BINARIES=bin/buildd-standalone bin/buildd-containerd bin/buildctl	bin/buildctl-darwin bin/buildd.exe bin/buildctl.exe
+ifneq (, $(BUILDX_BIN))
+	export BUILDX_CMD = $(BUILDX_BIN)
+else ifneq (, $(shell docker buildx version))
+	export BUILDX_CMD = docker buildx
+else ifneq (, $(shell command -v buildx))
+	export BUILDX_CMD = $(command -v buildx)
+endif
 
-binaries: $(BINARIES)
+export BUILDX_CMD ?= docker buildx
 
-bin/buildctl-darwin: FORCE
-	mkdir -p bin
-	docker build --build-arg GOOS=darwin -t buildkit:buildctl-darwin --target buildctl -f ./hack/dockerfiles/test.Dockerfile --force-rm .
-	( containerID=$$(docker create buildkit:buildctl-darwin noop); \
-		docker cp $$containerID:/usr/bin/buildctl $@; \
-		docker rm $$containerID )
-	chmod +x $@
+.PHONY: binaries
+binaries:
+	$(BUILDX_CMD) bake binaries
 
-bin/%.exe: FORCE
-	mkdir -p bin
-	docker build -t buildkit:$*.exe --target $*.exe -f ./hack/dockerfiles/test.Dockerfile --force-rm .
-	( containerID=$$(docker create buildkit:$*.exe noop); \
-		docker cp $$containerID:/$*.exe $@; \
-		docker rm $$containerID )
-	chmod +x $@
+.PHONY: cross
+cross:
+	$(BUILDX_CMD) bake binaries-cross
 
-bin/%: FORCE
-	mkdir -p bin
-	docker build -t buildkit:$* --target $* -f ./hack/dockerfiles/test.Dockerfile --force-rm .
-	( containerID=$$(docker create buildkit:$* noop); \
-		docker cp $$containerID:/usr/bin/$* $@; \
-		docker rm $$containerID )
-	chmod +x $@
+.PHONY: images
+images:
+# moby/buildkit:local and moby/buildkit:local-rootless are created on Docker
+	hack/images local moby/buildkit
+	TARGET=rootless hack/images local moby/buildkit
 
+.PHONY: install
+install:
+	mkdir -p $(DESTDIR)$(bindir)
+	install bin/build/* $(DESTDIR)$(bindir)
+
+.PHONY: release
+release:
+	./hack/release
+
+.PHONY: clean
+clean:
+	rm -rf ./bin
+
+.PHONY: test
 test:
-	./hack/test
+	./hack/test integration gateway dockerfile
 
+.PHONY: test-race
+test-race:
+	CGO_ENABLED=1 GOBUILDFLAGS="-race" ./hack/test integration gateway dockerfile
+
+.PHONY: lint
 lint:
-	./hack/lint
+	$(BUILDX_CMD) bake lint
 
+.PHONY: validate-vendor
 validate-vendor:
-	./hack/validate-vendor
+	$(BUILDX_CMD) bake validate-vendor
 
-validate-all: test lint validate-vendor
+.PHONY: validate-shfmt
+validate-shfmt:
+	$(BUILDX_CMD) bake validate-shfmt
 
+.PHONY: shfmt
+shfmt:
+	$(BUILDX_CMD) bake shfmt
+
+.PHONY: validate-authors
+validate-authors:
+	$(BUILDX_CMD) bake validate-authors
+
+.PHONY: validate-generated-files
+validate-generated-files:
+	$(BUILDX_CMD) bake validate-generated-files
+
+.PHONY: validate-archutil
+validate-archutil:
+	$(BUILDX_CMD) bake validate-archutil
+
+.PHONY: validate-doctoc
+validate-doctoc:
+	$(BUILDX_CMD) bake validate-doctoc
+
+.PHONY: validate-docs
+validate-docs:
+	$(BUILDX_CMD) bake validate-docs
+
+.PHONY: validate-all
+validate-all: test lint validate-vendor validate-generated-files validate-archutil validate-doctoc validate-docs
+
+.PHONY: vendor
 vendor:
-	./hack/update-vendor
+	$(eval $@_TMP_OUT := $(shell mktemp -d -t buildkit-output.XXXXXXXXXX))
+	$(BUILDX_CMD) bake --set "*.output=type=local,dest=$($@_TMP_OUT)" vendor
+	rm -rf ./vendor
+	cp -R "$($@_TMP_OUT)"/out/* .
+	rm -rf "$($@_TMP_OUT)"/
 
-.PHONY: vendor test binaries lint validate-all validate-vendor
-FORCE:
+.PHONY: generated-files
+generated-files:
+	$(BUILDX_CMD) bake generated-files
+
+.PHONY: archutil
+archutil:
+	$(BUILDX_CMD) bake archutil
+
+.PHONY: authors
+authors:
+	$(BUILDX_CMD) bake authors
+
+.PHONY: doctoc
+doctoc:
+	$(BUILDX_CMD) bake doctoc
+
+.PHONY: docs
+docs:
+	$(BUILDX_CMD) bake docs
+
+.PHONY: docs-dockerfile
+docs-dockerfile:
+	$(BUILDX_CMD) bake docs-dockerfile
+
+.PHONY: mod-outdated
+mod-outdated:
+	$(BUILDX_CMD) bake mod-outdated

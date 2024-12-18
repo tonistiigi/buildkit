@@ -2,37 +2,41 @@ package filesync
 
 import (
 	"context"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/testutil"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tonistiigi/fsutil"
 	"golang.org/x/sync/errgroup"
 )
 
 func TestFileSyncIncludePatterns(t *testing.T) {
-	tmpDir, err := ioutil.TempDir("", "fsynctest")
+	ctx := context.TODO()
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	tmpFS, err := fsutil.NewFS(tmpDir)
+	require.NoError(t, err)
+	destDir := t.TempDir()
+
+	err = os.WriteFile(filepath.Join(tmpDir, "foo"), []byte("content1"), 0600)
 	require.NoError(t, err)
 
-	destDir, err := ioutil.TempDir("", "fsynctest")
+	err = os.WriteFile(filepath.Join(tmpDir, "bar"), []byte("content2"), 0600)
 	require.NoError(t, err)
 
-	err = ioutil.WriteFile(filepath.Join(tmpDir, "foo"), []byte("content1"), 0600)
-	require.NoError(t, err)
-
-	err = ioutil.WriteFile(filepath.Join(tmpDir, "bar"), []byte("content2"), 0600)
-	require.NoError(t, err)
-
-	s, err := session.NewSession("foo", "bar")
+	s, err := session.NewSession(ctx, "bar")
 	require.NoError(t, err)
 
 	m, err := session.NewManager()
 	require.NoError(t, err)
 
-	fs := NewFSSyncProvider([]SyncedDir{{Name: "test0", Dir: tmpDir}})
+	fs := NewFSSyncProvider(StaticDirSource{"test0": tmpFS})
 	s.Allow(fs)
 
 	dialer := session.Dialer(testutil.TestStream(testutil.Handler(m.HandleConn)))
@@ -44,7 +48,14 @@ func TestFileSyncIncludePatterns(t *testing.T) {
 	})
 
 	g.Go(func() (reterr error) {
-		c, err := m.Get(ctx, s.ID())
+		defer func() {
+			err := s.Close()
+			if reterr == nil {
+				reterr = err
+			}
+		}()
+
+		c, err := m.Get(ctx, s.ID(), false)
 		if err != nil {
 			return err
 		}
@@ -56,15 +67,16 @@ func TestFileSyncIncludePatterns(t *testing.T) {
 			return err
 		}
 
-		_, err = ioutil.ReadFile(filepath.Join(destDir, "foo"))
-		assert.Error(t, err)
+		if _, err := os.ReadFile(filepath.Join(destDir, "foo")); err == nil {
+			return errors.Errorf("expected error reading foo")
+		}
 
-		dt, err := ioutil.ReadFile(filepath.Join(destDir, "bar"))
+		dt, err := os.ReadFile(filepath.Join(destDir, "bar"))
 		if err != nil {
 			return err
 		}
 		assert.Equal(t, "content2", string(dt))
-		return s.Close()
+		return nil
 	})
 
 	err = g.Wait()

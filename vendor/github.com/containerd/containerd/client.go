@@ -1,14 +1,41 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package containerd
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/containerd/platforms"
+	"github.com/containerd/typeurl/v2"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/opencontainers/runtime-spec/specs-go"
+	"golang.org/x/sync/semaphore"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health/grpc_health_v1"
 
 	containersapi "github.com/containerd/containerd/api/services/containers/v1"
 	contentapi "github.com/containerd/containerd/api/services/content/v1"
@@ -16,31 +43,33 @@ import (
 	eventsapi "github.com/containerd/containerd/api/services/events/v1"
 	imagesapi "github.com/containerd/containerd/api/services/images/v1"
 	introspectionapi "github.com/containerd/containerd/api/services/introspection/v1"
+	leasesapi "github.com/containerd/containerd/api/services/leases/v1"
 	namespacesapi "github.com/containerd/containerd/api/services/namespaces/v1"
-	snapshotapi "github.com/containerd/containerd/api/services/snapshot/v1"
+	sandboxsapi "github.com/containerd/containerd/api/services/sandbox/v1"
+	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	"github.com/containerd/containerd/api/services/tasks/v1"
 	versionservice "github.com/containerd/containerd/api/services/version/v1"
+	apitypes "github.com/containerd/containerd/api/types"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/dialer"
-	"github.com/containerd/containerd/diff"
+	contentproxy "github.com/containerd/containerd/content/proxy"
+	"github.com/containerd/containerd/defaults"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/leases"
+	leasesproxy "github.com/containerd/containerd/leases/proxy"
 	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/containerd/pkg/dialer"
 	"github.com/containerd/containerd/plugin"
-	"github.com/containerd/containerd/reference"
+	ptypes "github.com/containerd/containerd/protobuf/types"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
-	"github.com/containerd/containerd/remotes/docker/schema1"
-	"github.com/containerd/containerd/snapshot"
-	"github.com/containerd/typeurl"
-	ptypes "github.com/gogo/protobuf/types"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/pkg/errors"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/health/grpc_health_v1"
+	"github.com/containerd/containerd/sandbox"
+	sandboxproxy "github.com/containerd/containerd/sandbox/proxy"
+	"github.com/containerd/containerd/services/introspection"
+	"github.com/containerd/containerd/snapshots"
+	snproxy "github.com/containerd/containerd/snapshots/proxy"
 )
 
 func init() {
@@ -62,45 +91,156 @@ func New(address string, opts ...ClientOpt) (*Client, error) {
 			return nil, err
 		}
 	}
-	gopts := []grpc.DialOption{
-		grpc.WithBlock(),
-		grpc.WithInsecure(),
-		grpc.WithTimeout(60 * time.Second),
-		grpc.FailOnNonTempDialError(true),
-		grpc.WithBackoffMaxDelay(3 * time.Second),
-		grpc.WithDialer(dialer.Dialer),
+	if copts.timeout == 0 {
+		copts.timeout = 10 * time.Second
 	}
-	if len(copts.dialOptions) > 0 {
-		gopts = copts.dialOptions
+
+	c := &Client{
+		defaultns: copts.defaultns,
 	}
-	if copts.defaultns != "" {
-		unary, stream := newNSInterceptors(copts.defaultns)
-		gopts = append(gopts,
-			grpc.WithUnaryInterceptor(unary),
-			grpc.WithStreamInterceptor(stream),
-		)
+
+	if copts.defaultRuntime != "" {
+		c.runtime = copts.defaultRuntime
+	} else {
+		c.runtime = defaults.DefaultRuntime
 	}
-	conn, err := grpc.Dial(dialer.DialAddress(address), gopts...)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to dial %q", address)
+
+	if copts.defaultPlatform != nil {
+		c.platform = copts.defaultPlatform
+	} else {
+		c.platform = platforms.Default()
 	}
-	return NewWithConn(conn, opts...)
+
+	if copts.services != nil {
+		c.services = *copts.services
+	}
+	if address != "" {
+		backoffConfig := backoff.DefaultConfig
+		backoffConfig.MaxDelay = 3 * time.Second
+		connParams := grpc.ConnectParams{
+			Backoff: backoffConfig,
+		}
+		gopts := []grpc.DialOption{
+			grpc.WithBlock(),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.FailOnNonTempDialError(true),
+			grpc.WithConnectParams(connParams),
+			grpc.WithContextDialer(dialer.ContextDialer),
+			grpc.WithReturnConnectionError(),
+		}
+		if len(copts.dialOptions) > 0 {
+			gopts = copts.dialOptions
+		}
+		gopts = append(gopts, grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(defaults.DefaultMaxRecvMsgSize),
+			grpc.MaxCallSendMsgSize(defaults.DefaultMaxSendMsgSize)))
+		if len(copts.callOptions) > 0 {
+			gopts = append(gopts, grpc.WithDefaultCallOptions(copts.callOptions...))
+		}
+		if copts.defaultns != "" {
+			unary, stream := newNSInterceptors(copts.defaultns)
+			gopts = append(gopts, grpc.WithChainUnaryInterceptor(unary))
+			gopts = append(gopts, grpc.WithChainStreamInterceptor(stream))
+		}
+
+		connector := func() (*grpc.ClientConn, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), copts.timeout)
+			defer cancel()
+			conn, err := grpc.DialContext(ctx, dialer.DialAddress(address), gopts...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to dial %q: %w", address, err)
+			}
+			return conn, nil
+		}
+		conn, err := connector()
+		if err != nil {
+			return nil, err
+		}
+		c.conn, c.connector = conn, connector
+	}
+	if copts.services == nil && c.conn == nil {
+		return nil, fmt.Errorf("no grpc connection or services is available: %w", errdefs.ErrUnavailable)
+	}
+
+	// check namespace labels for default runtime
+	if copts.defaultRuntime == "" && c.defaultns != "" {
+		if label, err := c.GetLabel(context.Background(), defaults.DefaultRuntimeNSLabel); err != nil {
+			return nil, err
+		} else if label != "" {
+			c.runtime = label
+		}
+	}
+
+	return c, nil
 }
 
 // NewWithConn returns a new containerd client that is connected to the containerd
 // instance provided by the connection
 func NewWithConn(conn *grpc.ClientConn, opts ...ClientOpt) (*Client, error) {
-	return &Client{
-		conn:    conn,
-		runtime: fmt.Sprintf("%s.%s", plugin.RuntimePlugin, runtime.GOOS),
-	}, nil
+	var copts clientOpts
+	for _, o := range opts {
+		if err := o(&copts); err != nil {
+			return nil, err
+		}
+	}
+	c := &Client{
+		defaultns: copts.defaultns,
+		conn:      conn,
+		runtime:   fmt.Sprintf("%s.%s", plugin.RuntimePlugin, runtime.GOOS),
+	}
+
+	if copts.defaultPlatform != nil {
+		c.platform = copts.defaultPlatform
+	} else {
+		c.platform = platforms.Default()
+	}
+
+	// check namespace labels for default runtime
+	if copts.defaultRuntime == "" && c.defaultns != "" {
+		if label, err := c.GetLabel(context.Background(), defaults.DefaultRuntimeNSLabel); err != nil {
+			return nil, err
+		} else if label != "" {
+			c.runtime = label
+		}
+	}
+
+	if copts.services != nil {
+		c.services = *copts.services
+	}
+	return c, nil
 }
 
 // Client is the client to interact with containerd and its various services
 // using a uniform interface
 type Client struct {
-	conn    *grpc.ClientConn
-	runtime string
+	services
+	connMu    sync.Mutex
+	conn      *grpc.ClientConn
+	runtime   string
+	defaultns string
+	platform  platforms.MatchComparer
+	connector func() (*grpc.ClientConn, error)
+}
+
+// Reconnect re-establishes the GRPC connection to the containerd daemon
+func (c *Client) Reconnect() error {
+	if c.connector == nil {
+		return fmt.Errorf("unable to reconnect to containerd, no connector available: %w", errdefs.ErrUnavailable)
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	c.conn.Close()
+	conn, err := c.connector()
+	if err != nil {
+		return err
+	}
+	c.conn = conn
+	return nil
+}
+
+// Runtime returns the name of the runtime being used
+func (c *Client) Runtime() string {
+	return c.runtime
 }
 
 // IsServing returns true if the client can successfully connect to the
@@ -110,7 +250,13 @@ type Client struct {
 // connection. A timeout can be set in the context to ensure it returns
 // early.
 func (c *Client) IsServing(ctx context.Context) (bool, error) {
-	r, err := c.HealthService().Check(ctx, &grpc_health_v1.HealthCheckRequest{}, grpc.FailFast(false))
+	c.connMu.Lock()
+	if c.conn == nil {
+		c.connMu.Unlock()
+		return false, fmt.Errorf("no grpc connection available: %w", errdefs.ErrUnavailable)
+	}
+	c.connMu.Unlock()
+	r, err := c.HealthService().Check(ctx, &grpc_health_v1.HealthCheckRequest{}, grpc.WaitForReady(true))
 	if err != nil {
 		return false, err
 	}
@@ -130,14 +276,14 @@ func (c *Client) Containers(ctx context.Context, filters ...string) ([]Container
 	return out, nil
 }
 
-// NewContainer will create a new container in container with the provided id
-// the id must be unique within the namespace
+// NewContainer will create a new container with the provided id.
+// The id must be unique within the namespace.
 func (c *Client) NewContainer(ctx context.Context, id string, opts ...NewContainerOpts) (Container, error) {
-	ctx, done, err := c.withLease(ctx)
+	ctx, done, err := c.WithLease(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer done()
+	defer done(ctx)
 
 	container := containers.Container{
 		ID: id,
@@ -173,13 +319,25 @@ type RemoteContext struct {
 	// If no resolver is provided, defaults to Docker registry resolver.
 	Resolver remotes.Resolver
 
+	// PlatformMatcher is used to match the platforms for an image
+	// operation and define the preference when a single match is required
+	// from multiple platforms.
+	PlatformMatcher platforms.MatchComparer
+
 	// Unpack is done after an image is pulled to extract into a snapshotter.
+	// It is done simultaneously for schema 2 images when they are pulled.
 	// If an image is not unpacked on pull, it can be unpacked any time
 	// afterwards. Unpacking is required to run an image.
 	Unpack bool
 
+	// UnpackOpts handles options to the unpack call.
+	UnpackOpts []UnpackOpt
+
 	// Snapshotter used for unpacking
 	Snapshotter string
+
+	// SnapshotterOpts are additional options to be passed to a snapshotter during pull
+	SnapshotterOpts []snapshots.Opt
 
 	// Labels to be applied to the created image
 	Labels map[string]string
@@ -189,102 +347,87 @@ type RemoteContext struct {
 	// handlers.
 	BaseHandlers []images.Handler
 
+	// HandlerWrapper wraps the handler which gets sent to dispatch.
+	// Unlike BaseHandlers, this can run before and after the built
+	// in handlers, allowing operations to run on the descriptor
+	// after it has completed transferring.
+	HandlerWrapper func(images.Handler) images.Handler
+
 	// ConvertSchema1 is whether to convert Docker registry schema 1
 	// manifests. If this option is false then any image which resolves
 	// to schema 1 will return an error since schema 1 is not supported.
+	//
+	// Deprecated: use Schema 2 or OCI images.
 	ConvertSchema1 bool
+
+	// Platforms defines which platforms to handle when doing the image operation.
+	// Platforms is ignored when a PlatformMatcher is set, otherwise the
+	// platforms will be used to create a PlatformMatcher with no ordering
+	// preference.
+	Platforms []string
+
+	// MaxConcurrentDownloads is the max concurrent content downloads for each pull.
+	MaxConcurrentDownloads int
+
+	// MaxConcurrentUploadedLayers is the max concurrent uploaded layers for each push.
+	MaxConcurrentUploadedLayers int
+
+	// AllMetadata downloads all manifests and known-configuration files
+	AllMetadata bool
+
+	// ChildLabelMap sets the labels used to reference child objects in the content
+	// store. By default, all GC reference labels will be set for all fetched content.
+	ChildLabelMap func(ocispec.Descriptor) []string
 }
 
 func defaultRemoteContext() *RemoteContext {
 	return &RemoteContext{
-		Resolver: docker.NewResolver(docker.ResolverOptions{
-			Client: http.DefaultClient,
-		}),
-		Snapshotter: DefaultSnapshotter,
+		Resolver: docker.NewResolver(docker.ResolverOptions{}),
 	}
 }
 
-// Pull downloads the provided content into containerd's content store
-func (c *Client) Pull(ctx context.Context, ref string, opts ...RemoteOpt) (Image, error) {
-	pullCtx := defaultRemoteContext()
+// Fetch downloads the provided content into containerd's content store
+// and returns a non-platform specific image reference
+func (c *Client) Fetch(ctx context.Context, ref string, opts ...RemoteOpt) (images.Image, error) {
+	fetchCtx := defaultRemoteContext()
 	for _, o := range opts {
-		if err := o(c, pullCtx); err != nil {
-			return nil, err
+		if err := o(c, fetchCtx); err != nil {
+			return images.Image{}, err
 		}
 	}
-	store := c.ContentStore()
 
-	ctx, done, err := c.withLease(ctx)
+	if fetchCtx.Unpack {
+		return images.Image{}, fmt.Errorf("unpack on fetch not supported, try pull: %w", errdefs.ErrNotImplemented)
+	}
+
+	if fetchCtx.PlatformMatcher == nil {
+		if len(fetchCtx.Platforms) == 0 {
+			fetchCtx.PlatformMatcher = platforms.All
+		} else {
+			var ps []ocispec.Platform
+			for _, s := range fetchCtx.Platforms {
+				p, err := platforms.Parse(s)
+				if err != nil {
+					return images.Image{}, fmt.Errorf("invalid platform %s: %w", s, err)
+				}
+				ps = append(ps, p)
+			}
+
+			fetchCtx.PlatformMatcher = platforms.Any(ps...)
+		}
+	}
+
+	ctx, done, err := c.WithLease(ctx)
 	if err != nil {
-		return nil, err
+		return images.Image{}, err
 	}
-	defer done()
+	defer done(ctx)
 
-	name, desc, err := pullCtx.Resolver.Resolve(ctx, ref)
+	img, err := c.fetch(ctx, fetchCtx, ref, 0)
 	if err != nil {
-		return nil, err
+		return images.Image{}, err
 	}
-	fetcher, err := pullCtx.Resolver.Fetcher(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-
-	var (
-		schema1Converter *schema1.Converter
-		handler          images.Handler
-	)
-	if desc.MediaType == images.MediaTypeDockerSchema1Manifest && pullCtx.ConvertSchema1 {
-		schema1Converter = schema1.NewConverter(store, fetcher)
-		handler = images.Handlers(append(pullCtx.BaseHandlers, schema1Converter)...)
-	} else {
-		handler = images.Handlers(append(pullCtx.BaseHandlers,
-			remotes.FetchHandler(store, fetcher),
-			images.ChildrenHandler(store, platforms.Default()))...,
-		)
-	}
-
-	if err := images.Dispatch(ctx, handler, desc); err != nil {
-		return nil, err
-	}
-	if schema1Converter != nil {
-		desc, err = schema1Converter.Convert(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	imgrec := images.Image{
-		Name:   name,
-		Target: desc,
-		Labels: pullCtx.Labels,
-	}
-
-	is := c.ImageService()
-	if created, err := is.Create(ctx, imgrec); err != nil {
-		if !errdefs.IsAlreadyExists(err) {
-			return nil, err
-		}
-
-		updated, err := is.Update(ctx, imgrec)
-		if err != nil {
-			return nil, err
-		}
-
-		imgrec = updated
-	} else {
-		imgrec = created
-	}
-
-	img := &image{
-		client: c,
-		i:      imgrec,
-	}
-	if pullCtx.Unpack {
-		if err := img.Unpack(ctx, pullCtx.Snapshotter); err != nil {
-			return nil, err
-		}
-	}
-	return img, nil
+	return c.createNewImage(ctx, img)
 }
 
 // Push uploads the provided content to a remote resource
@@ -295,49 +438,52 @@ func (c *Client) Push(ctx context.Context, ref string, desc ocispec.Descriptor, 
 			return err
 		}
 	}
+	if pushCtx.PlatformMatcher == nil {
+		if len(pushCtx.Platforms) > 0 {
+			var ps []ocispec.Platform
+			for _, platform := range pushCtx.Platforms {
+				p, err := platforms.Parse(platform)
+				if err != nil {
+					return fmt.Errorf("invalid platform %s: %w", platform, err)
+				}
+				ps = append(ps, p)
+			}
+			pushCtx.PlatformMatcher = platforms.Any(ps...)
+		} else {
+			pushCtx.PlatformMatcher = platforms.All
+		}
+	}
+
+	// Annotate ref with digest to push only push tag for single digest
+	if !strings.Contains(ref, "@") {
+		ref = ref + "@" + desc.Digest.String()
+	}
 
 	pusher, err := pushCtx.Resolver.Pusher(ctx, ref)
 	if err != nil {
 		return err
 	}
 
-	var m sync.Mutex
-	manifestStack := []ocispec.Descriptor{}
+	var wrapper func(images.Handler) images.Handler
 
-	filterHandler := images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		switch desc.MediaType {
-		case images.MediaTypeDockerSchema2Manifest, ocispec.MediaTypeImageManifest,
-			images.MediaTypeDockerSchema2ManifestList, ocispec.MediaTypeImageIndex:
-			m.Lock()
-			manifestStack = append(manifestStack, desc)
-			m.Unlock()
-			return nil, images.ErrStopHandler
-		default:
-			return nil, nil
+	if len(pushCtx.BaseHandlers) > 0 {
+		wrapper = func(h images.Handler) images.Handler {
+			h = images.Handlers(append(pushCtx.BaseHandlers, h)...)
+			if pushCtx.HandlerWrapper != nil {
+				h = pushCtx.HandlerWrapper(h)
+			}
+			return h
 		}
-	})
-
-	cs := c.ContentStore()
-	pushHandler := remotes.PushHandler(cs, pusher)
-
-	handlers := append(pushCtx.BaseHandlers,
-		images.ChildrenHandler(cs, platforms.Default()),
-		filterHandler,
-		pushHandler,
-	)
-
-	if err := images.Dispatch(ctx, images.Handlers(handlers...), desc); err != nil {
-		return err
+	} else if pushCtx.HandlerWrapper != nil {
+		wrapper = pushCtx.HandlerWrapper
 	}
 
-	// Iterate in reverse order as seen, parent always uploaded after child
-	for i := len(manifestStack) - 1; i >= 0; i-- {
-		_, err := pushHandler(ctx, manifestStack[i])
-		if err != nil {
-			return err
-		}
+	var limiter *semaphore.Weighted
+	if pushCtx.MaxConcurrentUploadedLayers > 0 {
+		limiter = semaphore.NewWeighted(int64(pushCtx.MaxConcurrentUploadedLayers))
 	}
-	return nil
+
+	return remotes.PushContent(ctx, pusher, desc, c.ContentStore(), limiter, pushCtx.PlatformMatcher, wrapper)
 }
 
 // GetImage returns an existing image
@@ -346,10 +492,7 @@ func (c *Client) GetImage(ctx context.Context, ref string) (Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &image{
-		client: c,
-		i:      i,
-	}, nil
+	return NewImage(c, i), nil
 }
 
 // ListImages returns all existing images
@@ -360,118 +503,240 @@ func (c *Client) ListImages(ctx context.Context, filters ...string) ([]Image, er
 	}
 	images := make([]Image, len(imgs))
 	for i, img := range imgs {
-		images[i] = &image{
-			client: c,
-			i:      img,
-		}
+		images[i] = NewImage(c, img)
 	}
 	return images, nil
 }
 
-// Subscribe to events that match one or more of the provided filters.
-//
-// Callers should listen on both the envelope channel and errs channel. If the
-// errs channel returns nil or an error, the subscriber should terminate.
-//
-// To cancel shutdown reciept of events, cancel the provided context. The errs
-// channel will be closed and return a nil error.
-func (c *Client) Subscribe(ctx context.Context, filters ...string) (ch <-chan *eventsapi.Envelope, errs <-chan error) {
-	var (
-		evq  = make(chan *eventsapi.Envelope)
-		errq = make(chan error, 1)
-	)
-
-	errs = errq
-	ch = evq
-
-	session, err := c.EventService().Subscribe(ctx, &eventsapi.SubscribeRequest{
-		Filters: filters,
-	})
+// Restore restores a container from a checkpoint
+func (c *Client) Restore(ctx context.Context, id string, checkpoint Image, opts ...RestoreOpts) (Container, error) {
+	store := c.ContentStore()
+	index, err := decodeIndex(ctx, store, checkpoint.Target())
 	if err != nil {
-		errq <- err
-		close(errq)
-		return
+		return nil, err
 	}
 
-	go func() {
-		defer close(errq)
+	ctx, done, err := c.WithLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done(ctx)
 
-		for {
-			ev, err := session.Recv()
-			if err != nil {
-				errq <- err
-				return
-			}
+	copts := []NewContainerOpts{}
+	for _, o := range opts {
+		copts = append(copts, o(ctx, id, c, checkpoint, index))
+	}
 
-			select {
-			case evq <- ev:
-			case <-ctx.Done():
-				return
-			}
+	ctr, err := c.NewContainer(ctx, id, copts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return ctr, nil
+}
+
+func writeIndex(ctx context.Context, index *ocispec.Index, client *Client, ref string) (d ocispec.Descriptor, err error) {
+	labels := map[string]string{}
+	for i, m := range index.Manifests {
+		labels[fmt.Sprintf("containerd.io/gc.ref.content.%d", i)] = m.Digest.String()
+	}
+	data, err := json.Marshal(index)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	return writeContent(ctx, client.ContentStore(), ocispec.MediaTypeImageIndex, ref, bytes.NewReader(data), content.WithLabels(labels))
+}
+
+// GetLabel gets a label value from namespace store
+// If there is no default label, an empty string returned with nil error
+func (c *Client) GetLabel(ctx context.Context, label string) (string, error) {
+	ns, err := namespaces.NamespaceRequired(ctx)
+	if err != nil {
+		if c.defaultns == "" {
+			return "", err
 		}
-	}()
+		ns = c.defaultns
+	}
 
-	return ch, errs
+	srv := c.NamespaceService()
+	labels, err := srv.Labels(ctx, ns)
+	if err != nil {
+		return "", err
+	}
+
+	value := labels[label]
+	return value, nil
+}
+
+// Subscribe to events that match one or more of the provided filters.
+//
+// Callers should listen on both the envelope and errs channels. If the errs
+// channel returns nil or an error, the subscriber should terminate.
+//
+// The subscriber can stop receiving events by canceling the provided context.
+// The errs channel will be closed and return a nil error.
+func (c *Client) Subscribe(ctx context.Context, filters ...string) (ch <-chan *events.Envelope, errs <-chan error) {
+	return c.EventService().Subscribe(ctx, filters...)
 }
 
 // Close closes the clients connection to containerd
 func (c *Client) Close() error {
-	return c.conn.Close()
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+	return nil
 }
 
 // NamespaceService returns the underlying Namespaces Store
 func (c *Client) NamespaceService() namespaces.Store {
+	if c.namespaceStore != nil {
+		return c.namespaceStore
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
 	return NewNamespaceStoreFromClient(namespacesapi.NewNamespacesClient(c.conn))
 }
 
 // ContainerService returns the underlying container Store
 func (c *Client) ContainerService() containers.Store {
+	if c.containerStore != nil {
+		return c.containerStore
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
 	return NewRemoteContainerStore(containersapi.NewContainersClient(c.conn))
 }
 
 // ContentStore returns the underlying content Store
 func (c *Client) ContentStore() content.Store {
-	return NewContentStoreFromClient(contentapi.NewContentClient(c.conn))
+	if c.contentStore != nil {
+		return c.contentStore
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return contentproxy.NewContentStore(contentapi.NewContentClient(c.conn))
 }
 
 // SnapshotService returns the underlying snapshotter for the provided snapshotter name
-func (c *Client) SnapshotService(snapshotterName string) snapshot.Snapshotter {
-	return NewSnapshotterFromClient(snapshotapi.NewSnapshotsClient(c.conn), snapshotterName)
+func (c *Client) SnapshotService(snapshotterName string) snapshots.Snapshotter {
+	snapshotterName, err := c.resolveSnapshotterName(context.Background(), snapshotterName)
+	if err != nil {
+		snapshotterName = DefaultSnapshotter
+	}
+	if c.snapshotters != nil {
+		return c.snapshotters[snapshotterName]
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return snproxy.NewSnapshotter(snapshotsapi.NewSnapshotsClient(c.conn), snapshotterName)
+}
+
+// DefaultNamespace return the default namespace
+func (c *Client) DefaultNamespace() string {
+	return c.defaultns
 }
 
 // TaskService returns the underlying TasksClient
 func (c *Client) TaskService() tasks.TasksClient {
+	if c.taskService != nil {
+		return c.taskService
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
 	return tasks.NewTasksClient(c.conn)
 }
 
 // ImageService returns the underlying image Store
 func (c *Client) ImageService() images.Store {
+	if c.imageStore != nil {
+		return c.imageStore
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
 	return NewImageStoreFromClient(imagesapi.NewImagesClient(c.conn))
 }
 
 // DiffService returns the underlying Differ
-func (c *Client) DiffService() diff.Differ {
+func (c *Client) DiffService() DiffService {
+	if c.diffService != nil {
+		return c.diffService
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
 	return NewDiffServiceFromClient(diffapi.NewDiffClient(c.conn))
 }
 
 // IntrospectionService returns the underlying Introspection Client
-func (c *Client) IntrospectionService() introspectionapi.IntrospectionClient {
-	return introspectionapi.NewIntrospectionClient(c.conn)
+func (c *Client) IntrospectionService() introspection.Service {
+	if c.introspectionService != nil {
+		return c.introspectionService
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return introspection.NewIntrospectionServiceFromClient(introspectionapi.NewIntrospectionClient(c.conn))
+}
+
+// LeasesService returns the underlying Leases Client
+func (c *Client) LeasesService() leases.Manager {
+	if c.leasesService != nil {
+		return c.leasesService
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return leasesproxy.NewLeaseManager(leasesapi.NewLeasesClient(c.conn))
 }
 
 // HealthService returns the underlying GRPC HealthClient
 func (c *Client) HealthService() grpc_health_v1.HealthClient {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
 	return grpc_health_v1.NewHealthClient(c.conn)
 }
 
-// EventService returns the underlying EventsClient
-func (c *Client) EventService() eventsapi.EventsClient {
-	return eventsapi.NewEventsClient(c.conn)
+// EventService returns the underlying event service
+func (c *Client) EventService() EventService {
+	if c.eventService != nil {
+		return c.eventService
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return NewEventServiceFromClient(eventsapi.NewEventsClient(c.conn))
+}
+
+// SandboxStore returns the underlying sandbox store client
+func (c *Client) SandboxStore() sandbox.Store {
+	if c.sandboxStore != nil {
+		return c.sandboxStore
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return sandboxproxy.NewSandboxStore(sandboxsapi.NewStoreClient(c.conn))
+}
+
+// SandboxController returns the underlying sandbox controller client
+func (c *Client) SandboxController() sandbox.Controller {
+	if c.sandboxController != nil {
+		return c.sandboxController
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return sandboxproxy.NewSandboxController(sandboxsapi.NewControllerClient(c.conn))
 }
 
 // VersionService returns the underlying VersionClient
 func (c *Client) VersionService() versionservice.VersionClient {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
 	return versionservice.NewVersionClient(c.conn)
+}
+
+// Conn returns the underlying GRPC connection object
+func (c *Client) Conn() *grpc.ClientConn {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.conn
 }
 
 // Version of containerd
@@ -484,6 +749,12 @@ type Version struct {
 
 // Version returns the version of containerd that the client is connected to
 func (c *Client) Version(ctx context.Context) (Version, error) {
+	c.connMu.Lock()
+	if c.conn == nil {
+		c.connMu.Unlock()
+		return Version{}, fmt.Errorf("no grpc connection available: %w", errdefs.ErrUnavailable)
+	}
+	c.connMu.Unlock()
 	response, err := c.VersionService().Version(ctx, &ptypes.Empty{})
 	if err != nil {
 		return Version{}, err
@@ -494,157 +765,123 @@ func (c *Client) Version(ctx context.Context) (Version, error) {
 	}, nil
 }
 
-type imageFormat string
-
-const (
-	ociImageFormat imageFormat = "oci"
-)
-
-type importOpts struct {
-	format    imageFormat
-	refObject string
-	labels    map[string]string
+// ServerInfo represents the introspected server information
+type ServerInfo struct {
+	UUID string
 }
 
-// ImportOpt allows the caller to specify import specific options
-type ImportOpt func(c *importOpts) error
-
-// WithImportLabel sets a label to be associated with an imported image
-func WithImportLabel(key, value string) ImportOpt {
-	return func(opts *importOpts) error {
-		if opts.labels == nil {
-			opts.labels = make(map[string]string)
-		}
-
-		opts.labels[key] = value
-		return nil
+// Server returns server information from the introspection service
+func (c *Client) Server(ctx context.Context) (ServerInfo, error) {
+	c.connMu.Lock()
+	if c.conn == nil {
+		c.connMu.Unlock()
+		return ServerInfo{}, fmt.Errorf("no grpc connection available: %w", errdefs.ErrUnavailable)
 	}
+	c.connMu.Unlock()
+
+	response, err := c.IntrospectionService().Server(ctx, &ptypes.Empty{})
+	if err != nil {
+		return ServerInfo{}, err
+	}
+	return ServerInfo{
+		UUID: response.UUID,
+	}, nil
 }
 
-// WithImportLabels associates a set of labels to an imported image
-func WithImportLabels(labels map[string]string) ImportOpt {
-	return func(opts *importOpts) error {
-		if opts.labels == nil {
-			opts.labels = make(map[string]string)
-		}
-
-		for k, v := range labels {
-			opts.labels[k] = v
-		}
-		return nil
-	}
-}
-
-// WithOCIImportFormat sets the import format for an OCI image format
-func WithOCIImportFormat() ImportOpt {
-	return func(c *importOpts) error {
-		if c.format != "" {
-			return errors.New("format already set")
-		}
-		c.format = ociImageFormat
-		return nil
-	}
-}
-
-// WithRefObject specifies the ref object to import.
-// If refObject is empty, it is copied from the ref argument of Import().
-func WithRefObject(refObject string) ImportOpt {
-	return func(c *importOpts) error {
-		c.refObject = refObject
-		return nil
-	}
-}
-
-func resolveImportOpt(ref string, opts ...ImportOpt) (importOpts, error) {
-	var iopts importOpts
-	for _, o := range opts {
-		if err := o(&iopts); err != nil {
-			return iopts, err
-		}
-	}
-	// use OCI as the default format
-	if iopts.format == "" {
-		iopts.format = ociImageFormat
-	}
-	// if refObject is not explicitly specified, use the one specified in ref
-	if iopts.refObject == "" {
-		refSpec, err := reference.Parse(ref)
+func (c *Client) resolveSnapshotterName(ctx context.Context, name string) (string, error) {
+	if name == "" {
+		label, err := c.GetLabel(ctx, defaults.DefaultSnapshotterNSLabel)
 		if err != nil {
-			return iopts, err
+			return "", err
 		}
-		iopts.refObject = refSpec.Object
+
+		if label != "" {
+			name = label
+		} else {
+			name = DefaultSnapshotter
+		}
 	}
-	return iopts, nil
+
+	return name, nil
 }
 
-// Import imports an image from a Tar stream using reader.
-// OCI format is assumed by default.
-//
-// Note that unreferenced blobs are imported to the content store as well.
-func (c *Client) Import(ctx context.Context, ref string, reader io.Reader, opts ...ImportOpt) (Image, error) {
-	iopts, err := resolveImportOpt(ref, opts...)
+func (c *Client) getSnapshotter(ctx context.Context, name string) (snapshots.Snapshotter, error) {
+	name, err := c.resolveSnapshotterName(ctx, name)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx, done, err := c.withLease(ctx)
+	s := c.SnapshotService(name)
+	if s == nil {
+		return nil, fmt.Errorf("snapshotter %s was not found: %w", name, errdefs.ErrNotFound)
+	}
+
+	return s, nil
+}
+
+// CheckRuntime returns true if the current runtime matches the expected
+// runtime. Providing various parts of the runtime schema will match those
+// parts of the expected runtime
+func CheckRuntime(current, expected string) bool {
+	cp := strings.Split(current, ".")
+	l := len(cp)
+	for i, p := range strings.Split(expected, ".") {
+		if i > l {
+			return false
+		}
+		if p != cp[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// GetSnapshotterSupportedPlatforms returns a platform matchers which represents the
+// supported platforms for the given snapshotters
+func (c *Client) GetSnapshotterSupportedPlatforms(ctx context.Context, snapshotterName string) (platforms.MatchComparer, error) {
+	filters := []string{fmt.Sprintf("type==%s, id==%s", plugin.SnapshotPlugin, snapshotterName)}
+	in := c.IntrospectionService()
+
+	resp, err := in.Plugins(ctx, filters)
 	if err != nil {
 		return nil, err
 	}
-	defer done()
 
-	switch iopts.format {
-	case ociImageFormat:
-		return c.importFromOCITar(ctx, ref, reader, iopts)
-	default:
-		return nil, errors.Errorf("unsupported format: %s", iopts.format)
+	if len(resp.Plugins) <= 0 {
+		return nil, fmt.Errorf("inspection service could not find snapshotter %s plugin", snapshotterName)
 	}
+
+	sn := resp.Plugins[0]
+	snPlatforms := toPlatforms(sn.Platforms)
+	return platforms.Any(snPlatforms...), nil
 }
 
-type exportOpts struct {
-	format imageFormat
-}
-
-// ExportOpt allows callers to set export options
-type ExportOpt func(c *exportOpts) error
-
-// WithOCIExportFormat sets the OCI image format as the export target
-func WithOCIExportFormat() ExportOpt {
-	return func(c *exportOpts) error {
-		if c.format != "" {
-			return errors.New("format already set")
-		}
-		c.format = ociImageFormat
-		return nil
-	}
-}
-
-// TODO: add WithMediaTypeTranslation that transforms media types according to the format.
-// e.g. application/vnd.docker.image.rootfs.diff.tar.gzip
-//      -> application/vnd.oci.image.layer.v1.tar+gzip
-
-// Export exports an image to a Tar stream.
-// OCI format is used by default.
-// It is up to caller to put "org.opencontainers.image.ref.name" annotation to desc.
-func (c *Client) Export(ctx context.Context, desc ocispec.Descriptor, opts ...ExportOpt) (io.ReadCloser, error) {
-	var eopts exportOpts
-	for _, o := range opts {
-		if err := o(&eopts); err != nil {
-			return nil, err
+func toPlatforms(pt []*apitypes.Platform) []ocispec.Platform {
+	platforms := make([]ocispec.Platform, len(pt))
+	for i, p := range pt {
+		platforms[i] = ocispec.Platform{
+			Architecture: p.Architecture,
+			OS:           p.OS,
+			Variant:      p.Variant,
 		}
 	}
-	// use OCI as the default format
-	if eopts.format == "" {
-		eopts.format = ociImageFormat
+	return platforms
+}
+
+// GetSnapshotterCapabilities returns the capabilities of a snapshotter.
+func (c *Client) GetSnapshotterCapabilities(ctx context.Context, snapshotterName string) ([]string, error) {
+	filters := []string{fmt.Sprintf("type==%s, id==%s", plugin.SnapshotPlugin, snapshotterName)}
+	in := c.IntrospectionService()
+
+	resp, err := in.Plugins(ctx, filters)
+	if err != nil {
+		return nil, err
 	}
-	pr, pw := io.Pipe()
-	switch eopts.format {
-	case ociImageFormat:
-		go func() {
-			pw.CloseWithError(c.exportToOCITar(ctx, desc, pw, eopts))
-		}()
-	default:
-		return nil, errors.Errorf("unsupported format: %s", eopts.format)
+
+	if len(resp.Plugins) <= 0 {
+		return nil, fmt.Errorf("inspection service could not find snapshotter %s plugin", snapshotterName)
 	}
-	return pr, nil
+
+	sn := resp.Plugins[0]
+	return sn.Capabilities, nil
 }

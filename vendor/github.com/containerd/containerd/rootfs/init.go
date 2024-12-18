@@ -1,16 +1,31 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package rootfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/snapshot"
+	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/log"
 	digest "github.com/opencontainers/go-digest"
-	"github.com/pkg/errors"
 )
 
 var (
@@ -26,10 +41,10 @@ type Mounter interface {
 }
 
 // InitRootFS initializes the snapshot for use as a rootfs
-func InitRootFS(ctx context.Context, name string, parent digest.Digest, readonly bool, snapshotter snapshot.Snapshotter, mounter Mounter) ([]mount.Mount, error) {
+func InitRootFS(ctx context.Context, name string, parent digest.Digest, readonly bool, snapshotter snapshots.Snapshotter, mounter Mounter) ([]mount.Mount, error) {
 	_, err := snapshotter.Stat(ctx, name)
 	if err == nil {
-		return nil, errors.Errorf("rootfs already exists")
+		return nil, errors.New("rootfs already exists")
 	}
 	// TODO: ensure not exist error once added to snapshot package
 
@@ -51,7 +66,7 @@ func InitRootFS(ctx context.Context, name string, parent digest.Digest, readonly
 	return snapshotter.Prepare(ctx, name, parentS)
 }
 
-func createInitLayer(ctx context.Context, parent, initName string, initFn func(string) error, snapshotter snapshot.Snapshotter, mounter Mounter) (string, error) {
+func createInitLayer(ctx context.Context, parent, initName string, initFn func(string) error, snapshotter snapshots.Snapshotter, mounter Mounter) (_ string, retErr error) {
 	initS := fmt.Sprintf("%s %s", parent, initName)
 	if _, err := snapshotter.Stat(ctx, initS); err == nil {
 		return initS, nil
@@ -59,7 +74,7 @@ func createInitLayer(ctx context.Context, parent, initName string, initFn func(s
 	// TODO: ensure not exist error once added to snapshot package
 
 	// Create tempdir
-	td, err := ioutil.TempDir("", "create-init-")
+	td, err := os.MkdirTemp(os.Getenv("XDG_RUNTIME_DIR"), "create-init-")
 	if err != nil {
 		return "", err
 	}
@@ -69,12 +84,12 @@ func createInitLayer(ctx context.Context, parent, initName string, initFn func(s
 	if err != nil {
 		return "", err
 	}
+
 	defer func() {
-		if err != nil {
-			// TODO: once implemented uncomment
-			//if rerr := snapshotter.Remove(ctx, td); rerr != nil {
-			//	log.G(ctx).Errorf("Failed to remove snapshot %s: %v", td, merr)
-			//}
+		if retErr != nil {
+			if rerr := snapshotter.Remove(ctx, td); rerr != nil {
+				log.G(ctx).Errorf("Failed to remove snapshot %s: %v", td, rerr)
+			}
 		}
 	}()
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 
 	"github.com/moby/buildkit/client/llb"
@@ -23,7 +24,7 @@ func main() {
 
 	built := pb.With(llbbuild.Build())
 
-	dt, err := llb.Image("docker.io/library/alpine:latest").Run(llb.Shlex("ls -l /out"), llb.AddMount("/out", built, llb.Readonly)).Marshal()
+	dt, err := llb.Image("docker.io/library/alpine:latest").Run(llb.Shlex("ls -l /out"), llb.AddMount("/out", built, llb.Readonly)).Marshal(context.TODO(), llb.LinuxAmd64)
 	if err != nil {
 		panic(err)
 	}
@@ -31,9 +32,9 @@ func main() {
 }
 
 func goBuildBase() llb.State {
-	goAlpine := llb.Image("docker.io/library/golang:1.9-alpine")
+	goAlpine := llb.Image("docker.io/library/golang:1.23-alpine")
 	return goAlpine.
-		AddEnv("PATH", "/usr/local/go/bin:"+system.DefaultPathEnv).
+		AddEnv("PATH", "/usr/local/go/bin:"+system.DefaultPathEnvUnix).
 		AddEnv("GOPATH", "/go").
 		Run(llb.Shlex("apk add --no-cache g++ linux-headers make")).Root()
 }

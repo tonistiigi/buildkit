@@ -1,21 +1,36 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package exchange
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
+
+	"github.com/containerd/log"
+	"github.com/containerd/typeurl/v2"
+	goevents "github.com/docker/go-events"
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/filters"
 	"github.com/containerd/containerd/identifiers"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/typeurl"
-	goevents "github.com/docker/go-events"
-	"github.com/gogo/protobuf/types"
-	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 // Exchange broadcasts events
@@ -34,9 +49,9 @@ var _ events.Publisher = &Exchange{}
 var _ events.Forwarder = &Exchange{}
 var _ events.Subscriber = &Exchange{}
 
-// Forward accepts an envelope to be direcly distributed on the exchange.
+// Forward accepts an envelope to be directly distributed on the exchange.
 //
-// This is useful when an event is forwaded on behalf of another namespace or
+// This is useful when an event is forwarded on behalf of another namespace or
 // when the event is propagated on behalf of another publisher.
 func (e *Exchange) Forward(ctx context.Context, envelope *events.Envelope) (err error) {
 	if err := validateEnvelope(envelope); err != nil {
@@ -44,16 +59,16 @@ func (e *Exchange) Forward(ctx context.Context, envelope *events.Envelope) (err 
 	}
 
 	defer func() {
-		logger := log.G(ctx).WithFields(logrus.Fields{
+		logger := log.G(ctx).WithFields(log.Fields{
 			"topic": envelope.Topic,
 			"ns":    envelope.Namespace,
-			"type":  envelope.Event.TypeUrl,
+			"type":  envelope.Event.GetTypeUrl(),
 		})
 
 		if err != nil {
 			logger.WithError(err).Error("error forwarding event")
 		} else {
-			logger.Debug("event forwarded")
+			logger.Trace("event forwarded")
 		}
 	}()
 
@@ -66,19 +81,18 @@ func (e *Exchange) Forward(ctx context.Context, envelope *events.Envelope) (err 
 func (e *Exchange) Publish(ctx context.Context, topic string, event events.Event) (err error) {
 	var (
 		namespace string
-		encoded   *types.Any
 		envelope  events.Envelope
 	)
 
 	namespace, err = namespaces.NamespaceRequired(ctx)
 	if err != nil {
-		return errors.Wrapf(err, "failed publishing event")
+		return fmt.Errorf("failed publishing event: %w", err)
 	}
 	if err := validateTopic(topic); err != nil {
-		return errors.Wrapf(err, "envelope topic %q", topic)
+		return fmt.Errorf("envelope topic %q: %w", topic, err)
 	}
 
-	encoded, err = typeurl.MarshalAny(event)
+	encoded, err := typeurl.MarshalAny(event)
 	if err != nil {
 		return err
 	}
@@ -89,16 +103,16 @@ func (e *Exchange) Publish(ctx context.Context, topic string, event events.Event
 	envelope.Event = encoded
 
 	defer func() {
-		logger := log.G(ctx).WithFields(logrus.Fields{
+		logger := log.G(ctx).WithFields(log.Fields{
 			"topic": envelope.Topic,
 			"ns":    envelope.Namespace,
-			"type":  envelope.Event.TypeUrl,
+			"type":  envelope.Event.GetTypeUrl(),
 		})
 
 		if err != nil {
 			logger.WithError(err).Error("error publishing event")
 		} else {
-			logger.Debug("event published")
+			logger.Trace("event published")
 		}
 	}()
 
@@ -122,10 +136,10 @@ func (e *Exchange) Subscribe(ctx context.Context, fs ...string) (ch <-chan *even
 	)
 
 	closeAll := func() {
-		defer close(errq)
-		defer e.broadcaster.Remove(dst)
-		defer queue.Close()
-		defer channel.Close()
+		channel.Close()
+		queue.Close()
+		e.broadcaster.Remove(dst)
+		close(errq)
 	}
 
 	ch = evch
@@ -134,7 +148,7 @@ func (e *Exchange) Subscribe(ctx context.Context, fs ...string) (ch <-chan *even
 	if len(fs) > 0 {
 		filter, err := filters.ParseAll(fs...)
 		if err != nil {
-			errq <- errors.Wrapf(err, "failed parsing subscription filters")
+			errq <- fmt.Errorf("failed parsing subscription filters: %w", err)
 			closeAll()
 			return
 		}
@@ -159,7 +173,7 @@ func (e *Exchange) Subscribe(ctx context.Context, fs ...string) (ch <-chan *even
 					// TODO(stevvooe): For the most part, we are well protected
 					// from this condition. Both Forward and Publish protect
 					// from this.
-					err = errors.Errorf("invalid envelope encountered %#v; please file a bug", ev)
+					err = fmt.Errorf("invalid envelope encountered %#v; please file a bug", ev)
 					break
 				}
 
@@ -187,21 +201,21 @@ func (e *Exchange) Subscribe(ctx context.Context, fs ...string) (ch <-chan *even
 
 func validateTopic(topic string) error {
 	if topic == "" {
-		return errors.Wrap(errdefs.ErrInvalidArgument, "must not be empty")
+		return fmt.Errorf("must not be empty: %w", errdefs.ErrInvalidArgument)
 	}
 
 	if topic[0] != '/' {
-		return errors.Wrapf(errdefs.ErrInvalidArgument, "must start with '/'")
+		return fmt.Errorf("must start with '/': %w", errdefs.ErrInvalidArgument)
 	}
 
 	if len(topic) == 1 {
-		return errors.Wrapf(errdefs.ErrInvalidArgument, "must have at least one component")
+		return fmt.Errorf("must have at least one component: %w", errdefs.ErrInvalidArgument)
 	}
 
 	components := strings.Split(topic[1:], "/")
 	for _, component := range components {
 		if err := identifiers.Validate(component); err != nil {
-			return errors.Wrapf(err, "failed validation on component %q", component)
+			return fmt.Errorf("failed validation on component %q: %w", component, err)
 		}
 	}
 
@@ -209,16 +223,16 @@ func validateTopic(topic string) error {
 }
 
 func validateEnvelope(envelope *events.Envelope) error {
-	if err := namespaces.Validate(envelope.Namespace); err != nil {
-		return errors.Wrapf(err, "event envelope has invalid namespace")
+	if err := identifiers.Validate(envelope.Namespace); err != nil {
+		return fmt.Errorf("event envelope has invalid namespace: %w", err)
 	}
 
 	if err := validateTopic(envelope.Topic); err != nil {
-		return errors.Wrapf(err, "envelope topic %q", envelope.Topic)
+		return fmt.Errorf("envelope topic %q: %w", envelope.Topic, err)
 	}
 
 	if envelope.Timestamp.IsZero() {
-		return errors.Wrapf(errdefs.ErrInvalidArgument, "timestamp must be set on forwarded event")
+		return fmt.Errorf("timestamp must be set on forwarded event: %w", errdefs.ErrInvalidArgument)
 	}
 
 	return nil

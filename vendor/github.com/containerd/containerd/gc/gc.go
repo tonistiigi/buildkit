@@ -1,3 +1,19 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 // Package gc experiments with providing central gc tooling to ensure
 // deterministic resource removal within containerd.
 //
@@ -8,10 +24,16 @@ package gc
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // ResourceType represents type of resource at a node
 type ResourceType uint8
+
+// ResourceMax represents the max resource.
+// Upper bits are stripped out during the mark phase, allowing the upper 3 bits
+// to be used by the caller reference function.
+const ResourceMax = ResourceType(0x1F)
 
 // Node presents a resource which has a type and key,
 // this node can be used to lookup other nodes.
@@ -19,6 +41,11 @@ type Node struct {
 	Type      ResourceType
 	Namespace string
 	Key       string
+}
+
+// Stats about a garbage collection run
+type Stats interface {
+	Elapsed() time.Duration
 }
 
 // Tricolor implements basic, single-thread tri-color GC. Given the roots, the
@@ -32,6 +59,8 @@ type Node struct {
 //
 // We can probably use this to inform a design for incremental GC by injecting
 // callbacks to the set modification algorithms.
+//
+// https://en.wikipedia.org/wiki/Tracing_garbage_collection#Tri-color_marking
 func Tricolor(roots []Node, refs func(ref Node) ([]Node, error)) (map[Node]struct{}, error) {
 	var (
 		grays     []Node                // maintain a gray "stack"
@@ -58,6 +87,8 @@ func Tricolor(roots []Node, refs func(ref Node) ([]Node, error)) (map[Node]struc
 			}
 		}
 
+		// strip bits above max resource type
+		id.Type = id.Type & ResourceMax
 		// mark as black when done
 		reachable[id] = struct{}{}
 	}
@@ -143,7 +174,7 @@ func ConcurrentMark(ctx context.Context, root <-chan Node, refs func(context.Con
 	return seen, nil
 }
 
-// Sweep removes all nodes returned through the channel which are not in
+// Sweep removes all nodes returned through the slice which are not in
 // the reachable set by calling the provided remove function.
 func Sweep(reachable map[Node]struct{}, all []Node, remove func(Node) error) error {
 	// All black objects are now reachable, and all white objects are

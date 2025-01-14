@@ -73,7 +73,7 @@ func runBuildkitd(
 	address := getBuildkitdAddr(tmpdir)
 	debugAddress := getBuildkitdDebugAddr(tmpdir)
 
-	args = append(args, "--root", tmpdir, "--addr", address, "--debugaddr", debugAddress, "--debug")
+	args = append(args, "--root", tmpdir, "--addr", address, "--debug")
 	cmd := exec.Command(args[0], args[1:]...) //nolint:gosec // test utility
 	cmd.Env = append(
 		os.Environ(),

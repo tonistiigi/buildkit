@@ -29,6 +29,7 @@ const (
 	buildArgPrefix       = "build-arg:"
 	labelPrefix          = "label:"
 	localSessionIDPrefix = "local-sessionid:"
+	devicePrefix         = "device:"
 
 	keyTarget           = "target"
 	keyCgroupParent     = "cgroup-parent"
@@ -41,7 +42,6 @@ const (
 	keyShmSize          = "shm-size"
 	keyTargetPlatform   = "platform"
 	keyUlimit           = "ulimit"
-	keyDevice           = "device"
 	keyCacheFrom        = "cache-from"    // for registry only. deprecated in favor of keyCacheImports
 	keyCacheImports     = "cache-imports" // JSON representation of []CacheOptionsEntry
 
@@ -190,9 +190,9 @@ func (bc *Client) init() error {
 	}
 	bc.Ulimits = ulimits
 
-	devices, err := parseDevices(opts[keyDevice])
+	devices, err := parseDevices(filter(opts, devicePrefix))
 	if err != nil {
-		return errors.Wrap(err, "failed to parse device")
+		return errors.Wrap(err, "failed to parse devices")
 	}
 	bc.Devices = devices
 

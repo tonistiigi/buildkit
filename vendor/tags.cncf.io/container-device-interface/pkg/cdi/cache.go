@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -114,6 +115,11 @@ func (c *Cache) configure(options ...Option) {
 	c.watch.stop()
 	if c.autoRefresh {
 		c.watch.setup(c.specDirs, c.dirErrors)
+		if len(c.dirErrors) > 0 {
+			for dir, err := range c.dirErrors {
+				log.Printf("CDI FSNotify error: %s: %v", dir, err)
+			}
+		}
 		c.watch.start(&c.Mutex, c.refresh, c.dirErrors)
 	}
 	c.refresh()
@@ -492,6 +498,7 @@ func (w *watch) setup(dirs []string, dirErrors map[string]error) {
 
 	w.watcher, err = fsnotify.NewWatcher()
 	if err != nil {
+		log.Printf("NewWatcher error: %v", err)
 		for _, dir := range dirs {
 			dirErrors[dir] = fmt.Errorf("failed to create watcher: %w", err)
 		}
@@ -566,6 +573,11 @@ func (w *watch) update(dirErrors map[string]error, removed ...string) bool {
 
 	for dir, ok = range w.tracked {
 		if ok {
+			continue
+		}
+
+		if w.watcher == nil {
+			log.Printf("skip %s, no watcher", dir)
 			continue
 		}
 

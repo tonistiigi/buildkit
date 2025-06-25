@@ -19,7 +19,7 @@ type CacheKeyStorage interface {
 
 	WalkResults(id string, fn func(CacheResult) error) error
 	Load(id string, resultID string) (CacheResult, error)
-	AddResult(id string, res CacheResult) error
+	AddResult(id string, res CacheStorageResult) error
 	Release(resultID string) error
 	WalkIDsByResult(resultID string, fn func(string) error) error
 
@@ -30,7 +30,7 @@ type CacheKeyStorage interface {
 }
 
 // CacheResult is a record for a single solve result
-type CacheResult struct {
+type CacheStorageResult struct {
 	CreatedAt time.Time
 	ID        string
 }

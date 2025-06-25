@@ -59,6 +59,9 @@ var backlinkKey = contextT("solver/exporter/backlinks")
 var resKey = contextT("solver/exporter/res")
 
 func (e *exporter) ExportTo(ctx context.Context, t CacheExporterTarget, opt CacheExportOpt) ([]CacheExporterRecord, error) {
+}
+
+func (e *exporter) ExportToOld(ctx context.Context, t CacheExporterTarget, opt CacheExportOpt) ([]CacheExporterRecord, error) {
 	var bkm map[string]CacheExporterRecord
 
 	if bk := ctx.Value(backlinkKey); bk == nil {

@@ -123,22 +123,41 @@ type CacheExporter interface {
 }
 
 // CacheExporterTarget defines object capable of receiving exports
-type CacheExporterTarget interface {
-	// Add creates a new object record that we can then add results to and
-	// connect to other records.
-	Add(dgst digest.Digest) CacheExporterRecord
+// type CacheExporterTargetV0 interface {
+// 	// Add creates a new object record that we can then add results to and
+// 	// connect to other records.
+// 	Add(dgst digest.Digest) CacheExporterRecord
 
-	// Visit marks a target as having been visited.
-	Visit(target any)
-	// Vistited returns true if a target has previously been marked as visited.
-	Visited(target any) bool
+// 	// Visit marks a target as having been visited.
+// 	Visit(target any)
+// 	// Vistited returns true if a target has previously been marked as visited.
+// 	Visited(target any) bool
+// }
+
+type CacheExporterTarget interface {
+	Add(dgst digest.Digest, deps [][]CacheLink, results []CacheResult) (CacheExporterRecord, bool, error)
+}
+
+// opaque interface
+type CacheExporterRecord interface{}
+
+type CacheLink struct {
+	Src CacheExporterRecord
+	// Index    int
+	Selector string
+}
+
+type CacheResult struct {
+	Index     int
+	CreatedAt time.Time
+	Result    *Remote
 }
 
 // CacheExporterRecord is a single object being exported
-type CacheExporterRecord interface {
-	AddResult(vtx digest.Digest, index int, createdAt time.Time, result *Remote)
-	LinkFrom(src CacheExporterRecord, index int, selector string)
-}
+// type CacheExporterRecord interface {
+// 	AddResult(vtx digest.Digest, index int, createdAt time.Time, result *Remote)
+// 	LinkFrom(src CacheExporterRecord, index int, selector string)
+// }
 
 // Remote is a descriptor or a list of stacked descriptors that can be pulled
 // from a content provider
@@ -148,14 +167,14 @@ type Remote struct {
 	Provider    content.InfoReaderProvider
 }
 
-// CacheLink is a link between two cache records
-type CacheLink struct {
-	Source   digest.Digest `json:",omitempty"`
-	Input    Index         `json:",omitempty"`
-	Output   Index         `json:",omitempty"`
-	Base     digest.Digest `json:",omitempty"`
-	Selector digest.Digest `json:",omitempty"`
-}
+// // CacheLink is a link between two cache records
+// type CacheLink struct {
+// 	Source   digest.Digest `json:",omitempty"`
+// 	Input    Index         `json:",omitempty"`
+// 	Output   Index         `json:",omitempty"`
+// 	Base     digest.Digest `json:",omitempty"`
+// 	Selector digest.Digest `json:",omitempty"`
+// }
 
 type ReleaseFunc func()
 

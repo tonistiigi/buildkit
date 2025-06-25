@@ -2,6 +2,7 @@ package cacheimport
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -21,11 +22,87 @@ func NewCacheChains() *CacheChains {
 type CacheChains struct {
 	items   []*item
 	visited map[any]struct{}
+
+	roots map[digest.Digest]*item
 }
 
 var _ solver.CacheExporterTarget = &CacheChains{}
 
-func (c *CacheChains) Add(dgst digest.Digest) solver.CacheExporterRecord {
+func (c *CacheChains) Add(dgst digest.Digest, deps [][]solver.CacheLink, results []solver.CacheResult) (solver.CacheExporterRecord, bool, error) {
+	if strings.HasPrefix(dgst.String(), "random:") {
+		return nil, false, nil
+	}
+	r := &item{
+		dgst:    dgst,
+		results: results,
+	}
+
+	if len(deps) == 0 {
+		if r, ok := c.roots[dgst]; ok {
+			r.results = append(r.results, results...)
+			return r, true, nil
+		}
+		return r, true, nil
+	}
+
+	matchDeps := make([]func() map[*link]struct{}, len(c.items))
+	for i, dd := range deps {
+		if len(dd) == 0 {
+			return nil, false, errors.Errorf("empty dependency for %s", dgst)
+		}
+		items := make([]*item, len(dd))
+		for i, d := range dd {
+			it, ok := d.Src.(*item)
+			if !ok {
+				return nil, false, errors.Errorf("invalid dependency type %T for %s", d.Src, dgst)
+			}
+			if it.cc != c {
+				return nil, false, errors.Errorf("dependency %s is not part of the same cache chain", it.dgst)
+			}
+			items[i] = it
+		}
+		matchDeps[i] = func() map[*link]struct{} {
+			var candidates map[*link]struct{}
+			for _, it := range items {
+				maps.Copy(candidates, it.getLinks(dgst, i, dd[0].Selector))
+			}
+			return candidates
+		}
+	}
+	items := IntersectAll(matchDeps)
+	if len(items) > 0 {
+		if len(items) > 1 {
+			return nil, false, errors.Errorf("TODO: multiple matching dependencies for %s: %v", dgst, items) // merge?
+		}
+	}
+
+}
+
+func IntersectAll[T comparable](
+	funcs []func() map[T]struct{},
+) map[T]struct{} {
+	if len(funcs) == 0 {
+		return nil
+	}
+
+	intersection := funcs[0]()
+
+	for _, f := range funcs[1:] {
+		next := f()
+		for k := range intersection {
+			if _, ok := next[k]; !ok {
+				delete(intersection, k)
+			}
+		}
+		if len(intersection) == 0 {
+			return nil
+		}
+	}
+
+	return intersection
+}
+
+func (c *CacheChains) AddOld(dgst digest.Digest) solver.CacheExporterRecord {
 	if strings.HasPrefix(dgst.String(), "random:") {
 		// random digests will be different *every* run - so we shouldn't cache
 		// it, since there's a zero chance this random digest collides again
@@ -187,13 +264,39 @@ type item struct {
 	result     *solver.Remote
 	resultTime time.Time
 
+	results []solver.CacheResult
+
 	invalid bool
+
+	cc *CacheChains
 }
 
 // link is a pointer to an item, with an optional selector.
 type link struct {
 	src      *item
 	selector string
+}
+
+func (c *item) getLinks(dgst digest.Digest, index int, selector string) map[*link]struct{} {
+	if index >= len(c.links) {
+		return nil
+	}
+
+	links := c.links[index]
+	if len(links) == 0 {
+		return nil
+	}
+
+	found := map[*link]struct{}{}
+	for l := range links {
+		if l.src.dgst == dgst && l.selector == selector {
+			found[&l] = struct{}{}
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return found
 }
 
 func (c *item) removeLink(src *item) bool {

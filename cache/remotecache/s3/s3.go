@@ -3,6 +3,8 @@ package s3
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -256,7 +258,7 @@ func (e *exporter) Finalize(ctx context.Context) (map[string]string, error) {
 						return layerDone(errors.Wrap(err, "error reading layer blob from provider"))
 					}
 					defer ra.Close()
-					if err := e.s3Client.saveMutableAt(groupCtx, key, &nopCloserSectionReader{io.NewSectionReader(ra, 0, ra.Size())}); err != nil {
+					if err := e.s3Client.saveMutableAt(groupCtx, key, dgstPair.Descriptor.Digest, &nopCloserSectionReader{io.NewSectionReader(ra, 0, ra.Size())}); err != nil {
 						return layerDone(errors.Wrap(err, "error writing layer blob"))
 					}
 					layerDone(nil)
@@ -290,7 +292,7 @@ func (e *exporter) Finalize(ctx context.Context) (map[string]string, error) {
 	}
 
 	for _, name := range e.config.Names {
-		if err := e.s3Client.saveMutableAt(ctx, e.s3Client.manifestKey(name), bytes.NewReader(dt)); err != nil {
+		if err := e.s3Client.saveMutableAt(ctx, e.s3Client.manifestKey(name), digest.FromBytes(dt), bytes.NewReader(dt)); err != nil {
 			return nil, errors.Wrapf(err, "error writing manifest: %s", name)
 		}
 	}
@@ -470,13 +472,20 @@ func (s3Client *s3Client) getReader(ctx context.Context, key string, offset int6
 	return output.Body, nil
 }
 
-func (s3Client *s3Client) saveMutableAt(ctx context.Context, key string, body io.Reader) error {
+func (s3Client *s3Client) saveMutableAt(ctx context.Context, key string, dgst digest.Digest, body io.Reader) error {
 	input := &s3.PutObjectInput{
 		Bucket: &s3Client.bucket,
 		Key:    &key,
 		Body:   body,
 	}
-	_, err := s3Client.Upload(ctx, input)
+	input.ChecksumAlgorithm = s3types.ChecksumAlgorithmSha256
+	raw, err := hex.DecodeString(dgst.Hex())
+	if err != nil {
+		return err
+	}
+	sum := base64.StdEncoding.EncodeToString(raw)
+	input.ChecksumSHA256 = &sum
+	_, err = s3Client.Upload(ctx, input)
 	return err
 }
 

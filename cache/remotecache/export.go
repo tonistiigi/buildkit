@@ -216,10 +216,7 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 		dgstPair := descs[desc.Digest]
 		layerDone := progress.OneOff(ctx, fmt.Sprintf("writing layer %s", desc.Digest))
 		if err := contentutil.Copy(ctx, ce.ingester, dgstPair.Provider, desc, ce.ref, logs.LoggerFromContext(ctx)); err != nil {
-			var statusErr remoteserrors.ErrUnexpectedStatus
-			if errors.As(err, &statusErr) {
-				err = errutil.WithDetails(err)
-			}
+			err = withRemoteCacheErrorDetails(err)
 			return nil, layerDone(errors.Wrap(err, "error writing layer blob"))
 		}
 		layerDone(nil)
@@ -248,6 +245,7 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 	}
 	configDone := progress.OneOff(ctx, fmt.Sprintf("writing config %s", dgst))
 	if err := content.WriteBlob(ctx, ce.ingester, dgst.String(), bytes.NewReader(dt), desc); err != nil {
+		err = withRemoteCacheErrorDetails(err)
 		return nil, configDone(errors.Wrap(err, "error writing config blob"))
 	}
 	configDone(nil)
@@ -272,6 +270,7 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 	}
 	mfstDone := progress.OneOff(ctx, mfstLog)
 	if err := content.WriteBlob(ctx, ce.ingester, dgst.String(), bytes.NewReader(dt), desc); err != nil {
+		err = withRemoteCacheErrorDetails(err)
 		return nil, mfstDone(errors.Wrap(err, "error writing manifest blob"))
 	}
 	descJSON, err := json.Marshal(desc)
@@ -282,4 +281,12 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 	mfstDone(nil)
 
 	return res, nil
+}
+
+func withRemoteCacheErrorDetails(err error) error {
+	var statusErr remoteserrors.ErrUnexpectedStatus
+	if errors.As(err, &statusErr) {
+		return errutil.WithDetails(err)
+	}
+	return err
 }

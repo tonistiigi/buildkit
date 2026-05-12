@@ -90,12 +90,9 @@ func testPinRaceIgnoreCacheShift(t *testing.T, sb integration.Sandbox) {
 	require.NoError(t, err)
 	defer c.Close()
 
-	defer sb.PrintLogs(t)
-
 	for i := range iterations {
 		url := fmt.Sprintf("%s/pin-race-%d", server.URL, i)
 		err := runPinRaceIteration(sb.Context(), c, url, i, headStart)
-		t.Logf("iteration %d: err=%v", i, err)
 		require.NoError(t, err, "iteration %d", i)
 	}
 }

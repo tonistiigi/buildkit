@@ -2,17 +2,14 @@ package ops
 
 import (
 	"context"
-	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/llbsolver/ops/opsutils"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/source"
-	"github.com/moby/buildkit/util/bklog"
 	"github.com/moby/buildkit/util/cachedigest"
 	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
@@ -81,28 +78,6 @@ func (s *SourceOp) CacheMap(ctx context.Context, jobCtx solver.JobContext, index
 	src, err := s.instance(ctx)
 	if err != nil {
 		return nil, false, err
-	}
-
-	// Instrumentation: widens the window where the SourceOp object exists
-	// in state.op.op (set by sharedOp.getOp before this method is called)
-	// and s.id has just been written by instance() above, but s.pin has not
-	// yet been written below. During this window a concurrent
-	// walkProvenance reading state.op.op as *SourceOp will get a non-nil
-	// SourceOp.Pin() id with an empty pin string, surfacing the issue
-	// #6731 symptom (digest.Parse "" -> "invalid checksum digest format").
-	// Set BUILDKIT_REPRO_DELAY_SOURCE_PIN=<duration> to enable; optionally
-	// gate by BUILDKIT_REPRO_DELAY_SOURCE_PIN_NAME=<substring of vertex name>.
-	if delay := os.Getenv("BUILDKIT_REPRO_DELAY_SOURCE_PIN"); delay != "" {
-		if needle := os.Getenv("BUILDKIT_REPRO_DELAY_SOURCE_PIN_NAME"); needle == "" || strings.Contains(s.vtx.Name(), needle) {
-			if d, perr := time.ParseDuration(delay); perr == nil {
-				bklog.G(ctx).
-					WithField("vertex_name", s.vtx.Name()).
-					WithField("vertex_digest", s.vtx.Digest()).
-					WithField("delay", d).
-					Error("SourceOp.CacheMap: sleeping between instance() and CacheKey()")
-				time.Sleep(d)
-			}
-		}
 	}
 
 	k, pin, cacheOpts, done, err := src.CacheKey(ctx, jobCtx, index)

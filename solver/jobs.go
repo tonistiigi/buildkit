@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -213,11 +211,6 @@ func (s *state) getEdge(index Index) *edge {
 
 	if s.op == nil {
 		s.op = newSharedOp(s.opts.ResolveOpFunc, s)
-		bklog.G(context.TODO()).
-			WithField("vertex_name", s.vtx.Name()).
-			WithField("vertex_digest", s.vtx.Digest()).
-			WithField("edge_index", index).
-			Error("created shared op")
 	}
 
 	e := newEdge(Edge{Index: index, Vertex: s.vtx}, s.op, s.index)
@@ -286,14 +279,6 @@ func (s *state) addJobs(srcState *state, memo map[*state]struct{}) {
 		// tricky case: if the inputState's edge was *already* merged we should
 		// also add jobs to the merged edge's state
 		mergedInputEdge := inputState.getEdge(inputEdge.Index)
-		inputState.mu.Lock()
-		if inputState.op != nil && inputState.op.op == nil {
-			bklog.G(context.TODO()).
-				WithField("vertex_digest", inputEdge.Vertex.Digest()).
-				WithField("vertex_name", inputEdge.Vertex.Name()).
-				Error("addJobs observed unresolved shared op")
-		}
-		inputState.mu.Unlock()
 		if mergedInputEdge == nil || mergedInputEdge.edge.Vertex.Digest() == inputEdge.Vertex.Digest() {
 			// not merged
 			continue
@@ -795,14 +780,6 @@ func (j *Job) Build(ctx context.Context, e Edge) (CachedResultWithProvenance, er
 		return nil, err
 	}
 	e.Vertex = v
-	if delay := os.Getenv("BUILDKIT_REPRO_DELAY_AFTER_LOAD"); delay != "" {
-		if needle := os.Getenv("BUILDKIT_REPRO_DELAY_AFTER_LOAD_NAME"); needle == "" || strings.Contains(e.Vertex.Name(), needle) {
-			d, err := time.ParseDuration(delay)
-			if err == nil {
-				time.Sleep(d)
-			}
-		}
-	}
 
 	res, err := j.list.s.build(ctx, e)
 	if err != nil {
@@ -836,21 +813,6 @@ func (j *Job) walkProvenance(ctx context.Context, e Edge, f func(ProvenanceProvi
 	visited[e.Vertex.Digest()] = struct{}{}
 	if st, ok := j.list.actives[e.Vertex.Digest()]; ok {
 		st.mu.Lock()
-		bklog.G(context.TODO()).
-			WithField("job", j.id).
-			WithField("vertex_name", e.Vertex.Name()).
-			WithField("vertex_digest", e.Vertex.Digest()).
-			WithField("has_shared_op", st.op != nil).
-			WithField("has_resolved_op", st.op != nil && st.op.op != nil).
-			Error("walkProvenance visiting active state")
-		if st.op == nil {
-			st.mu.Unlock()
-			return errors.Errorf("walkProvenance hit nil shared op for %s %s", e.Vertex.Name(), e.Vertex.Digest())
-		}
-		if st.op.op == nil {
-			st.mu.Unlock()
-			return errors.Errorf("walkProvenance hit unresolved op for %s %s", e.Vertex.Name(), e.Vertex.Digest())
-		}
 		if st.op != nil && st.op.op != nil {
 			if wp, ok := st.op.op.(ProvenanceProvider); ok {
 				if err := f(wp); err != nil {
@@ -1303,26 +1265,8 @@ func (s *sharedOp) Exec(ctx context.Context, inputs []Result) (outputs []Result,
 
 func (s *sharedOp) getOp() (Op, error) {
 	s.opOnce.Do(func() {
-		bklog.G(context.TODO()).
-			WithField("vertex_name", s.st.vtx.Name()).
-			WithField("vertex_digest", s.st.vtx.Digest()).
-			Error("resolving shared op")
-		if delay := os.Getenv("BUILDKIT_REPRO_DELAY_GETOP"); delay != "" {
-			if needle := os.Getenv("BUILDKIT_REPRO_DELAY_GETOP_NAME"); needle == "" || strings.Contains(s.st.vtx.Name(), needle) {
-				d, err := time.ParseDuration(delay)
-				if err == nil {
-					time.Sleep(d)
-				}
-			}
-		}
 		s.subBuilder = s.st.builder()
 		s.op, s.err = s.resolver(s.st.vtx, s.subBuilder)
-		bklog.G(context.TODO()).
-			WithField("vertex_name", s.st.vtx.Name()).
-			WithField("vertex_digest", s.st.vtx.Digest()).
-			WithField("resolved", s.op != nil).
-			WithField("error", s.err).
-			Error("resolved shared op")
 	})
 	if s.err != nil {
 		return nil, s.err

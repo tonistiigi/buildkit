@@ -28,7 +28,7 @@ type DB struct {
 
 	// hmu serializes operations that close or replace the handle.
 	hmu          sync.Mutex
-	reopenMu     sync.Mutex
+	reopenMu     sync.Mutex //nolint:unused // Used by Windows transaction handle recovery.
 	reopenNeeded atomic.Bool
 	bdb          *bolt.DB
 	closed       bool
